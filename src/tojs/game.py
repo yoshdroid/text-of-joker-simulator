@@ -380,18 +380,63 @@ def list_available_actions(state: MatchState, player_id: PlayerId) -> list[dict[
 
 
 def list_available_block_actions(state: MatchState, player_id: PlayerId) -> list[dict[str, Any]]:
+    return build_block_choice_payload(state, player_id)["available_choices"]
+
+
+def build_block_choice_payload(state: MatchState, player_id: PlayerId) -> dict[str, Any]:
     player = state.players[player_id]
-    actions = [{"kind": "no_block"}]
+    actions: list[dict[str, Any]] = [
+        {
+            "kind": "no_block",
+            "choice_label": "No block",
+            "choice_summary": "Take the attack without assigning a blocker.",
+            "choice_label_ja": "ブロックしない",
+            "choice_summary_ja": "ブロッカーを指定せずに攻撃を受けます。",
+        }
+    ]
+    unavailable_choices: list[dict[str, Any]] = []
     for blocker_index, unit in enumerate(player.battlefield):
+        card = state.card_catalog[unit.card_no]
         if unit.exhausted:
+            unavailable_choices.append(
+                {
+                    "kind": "block",
+                    "blocker_index": blocker_index,
+                    "card_no": unit.card_no,
+                    "card_name": card.name,
+                    "level": unit.level,
+                    "current_bp": get_unit_bp(state, unit),
+                    "current_damage": unit.current_damage,
+                    "disabled_reason": "unit_exhausted",
+                    "disabled_reason_message": _get_disabled_reason_message("unit_exhausted"),
+                    "choice_label": f"Block with {card.name}",
+                    "choice_summary": "Cannot block because the unit is exhausted.",
+                    "choice_label_ja": f"{card.name}でブロック",
+                    "choice_summary_ja": _get_disabled_reason_message("unit_exhausted"),
+                }
+            )
             continue
         actions.append(
             {
                 "kind": "block",
                 "blocker_index": blocker_index,
+                "card_no": unit.card_no,
+                "card_name": card.name,
+                "level": unit.level,
+                "current_bp": get_unit_bp(state, unit),
+                "current_damage": unit.current_damage,
+                "choice_label": f"Block with {card.name}",
+                "choice_summary": f"Lv.{unit.level} / {get_unit_bp(state, unit)} BP / damage {unit.current_damage}",
+                "choice_label_ja": f"{card.name}でブロック",
+                "choice_summary_ja": f"Lv.{unit.level} / BP {get_unit_bp(state, unit)} / ダメージ {unit.current_damage}",
             }
         )
-    return actions
+    return {
+        "choice_kind": "block",
+        "prompt": "Choose a blocker or no block.",
+        "available_choices": actions,
+        "unavailable_choices": unavailable_choices,
+    }
 
 
 def list_available_intercept_actions(
@@ -401,24 +446,78 @@ def list_available_intercept_actions(
     enemy_unit: UnitState,
     own_unit_is_attacker: bool,
 ) -> list[dict[str, Any]]:
+    return build_intercept_choice_payload(
+        state,
+        player_id,
+        own_unit,
+        enemy_unit,
+        own_unit_is_attacker,
+    )["available_choices"]
+
+
+def build_intercept_choice_payload(
+    state: MatchState,
+    player_id: PlayerId,
+    own_unit: UnitState,
+    enemy_unit: UnitState,
+    own_unit_is_attacker: bool,
+) -> dict[str, Any]:
     player = state.players[player_id]
-    actions = [{"kind": "no_intercept"}]
+    actions: list[dict[str, Any]] = [
+        {
+            "kind": "no_intercept",
+            "choice_label": "Pass intercept",
+            "choice_summary": "Do not use an intercept in this step.",
+            "choice_label_ja": "インターセプトしない",
+            "choice_summary_ja": "このタイミングではインターセプトを使いません。",
+        }
+    ]
+    unavailable_choices: list[dict[str, Any]] = []
     for trigger_index, card_no in enumerate(player.trigger_zone):
         card = state.card_catalog[card_no]
         if card.category != "intercept":
             continue
-        if not _can_use_intercept_card(state, player_id, card_no, own_unit_is_attacker):
+        disabled_reason = _get_intercept_disabled_reason(state, player_id, card_no, own_unit_is_attacker)
+        target = _get_intercept_target(card_no, own_unit_is_attacker)
+        if disabled_reason is not None:
+            unavailable_choices.append(
+                {
+                    "kind": "use_intercept",
+                    "trigger_index": trigger_index,
+                    "card_no": card_no,
+                    "card_name": card.name,
+                    "cost": card.cp or 0,
+                    "target": target,
+                    "disabled_reason": disabled_reason,
+                    "disabled_reason_message": _get_disabled_reason_message(disabled_reason),
+                    "choice_label": f"Use {card.name}",
+                    "choice_summary": f"Unavailable: {disabled_reason}",
+                    "choice_label_ja": f"{card.name}を使う",
+                    "choice_summary_ja": _get_disabled_reason_message(disabled_reason),
+                }
+            )
             continue
         actions.append(
             {
                 "kind": "use_intercept",
                 "trigger_index": trigger_index,
                 "card_no": card_no,
+                "card_name": card.name,
                 "cost": card.cp or 0,
-                "target": _get_intercept_target(card_no, own_unit_is_attacker),
+                "target": target,
+                "choice_label": f"Use {card.name}",
+                "choice_summary": f"CP {card.cp or 0} / target {target}",
+                "choice_label_ja": f"{card.name}を使う",
+                "choice_summary_ja": f"CP {card.cp or 0} / 対象 {_get_target_label_ja(target)}",
             }
         )
-    return actions
+    return {
+        "choice_kind": "intercept",
+        "prompt": "Choose an intercept or pass.",
+        "available_choices": actions,
+        "unavailable_choices": unavailable_choices,
+        "battle": _build_battle_choice_payload(state, own_unit, enemy_unit, own_unit_is_attacker),
+    }
 
 
 def apply_drive_action(
@@ -916,13 +1015,20 @@ def _build_enemy_unit_choices(state: MatchState, player_id: PlayerId) -> list[di
     enemy_id = get_opponent_id(player_id)
     choices: list[dict[str, Any]] = []
     for target_index, unit in enumerate(state.players[enemy_id].battlefield):
+        card = state.card_catalog[unit.card_no]
         choices.append(
             {
                 "kind": "choose_unit",
                 "target_index": target_index,
                 "card_no": unit.card_no,
+                "card_name": card.name,
+                "level": unit.level,
                 "current_bp": get_unit_bp(state, unit),
                 "current_damage": unit.current_damage,
+                "choice_label": f"Target {card.name}",
+                "choice_summary": f"Lv.{unit.level} / {get_unit_bp(state, unit)} BP / damage {unit.current_damage}",
+                "choice_label_ja": f"{card.name}を対象にする",
+                "choice_summary_ja": f"Lv.{unit.level} / BP {get_unit_bp(state, unit)} / ダメージ {unit.current_damage}",
             }
         )
     return choices
@@ -942,6 +1048,7 @@ def _choose_enemy_unit(
     selected = _request_choice(
         player_id,
         {
+            "choice_kind": "target_unit",
             "prompt": prompt,
             "source_card_no": source_card_no,
             "available_choices": choices,
@@ -958,12 +1065,18 @@ def _build_hand_card_choices(state: MatchState, player_id: PlayerId) -> list[dic
     choices: list[dict[str, Any]] = []
     for hand_index, hand_card_id in enumerate(state.players[player_id].hand):
         card_no, level = parse_hand_card_id(hand_card_id)
+        card = state.card_catalog[card_no]
         choices.append(
             {
                 "kind": "discard_hand",
                 "hand_index": hand_index,
                 "card_no": card_no,
+                "card_name": card.name,
                 "level": level,
+                "choice_label": f"Discard {card.name}",
+                "choice_summary": f"Hand index {hand_index} / Lv.{level}",
+                "choice_label_ja": f"{card.name}を捨てる",
+                "choice_summary_ja": f"手札位置 {hand_index} / Lv.{level}",
             }
         )
     return choices
@@ -982,6 +1095,7 @@ def _choose_hand_card_to_discard(
     selected = _request_choice(
         player_id,
         {
+            "choice_kind": "discard_hand",
             "prompt": prompt,
             "source_card_no": source_card_no,
             "available_choices": choices,
@@ -1089,19 +1203,42 @@ def _can_use_intercept_card(
     card_no: str,
     own_unit_is_attacker: bool,
 ) -> bool:
+    return _get_intercept_disabled_reason(state, player_id, card_no, own_unit_is_attacker) is None
+
+
+def _get_intercept_disabled_reason(
+    state: MatchState,
+    player_id: PlayerId,
+    card_no: str,
+    own_unit_is_attacker: bool,
+) -> str | None:
     player = state.players[player_id]
     card = state.card_catalog[card_no]
     if card.category != "intercept":
-        return False
+        return "not_intercept_card"
     if (card.cp or 0) > player.current_cp:
-        return False
+        return "not_enough_cp"
     if card.color != "無" and not any(
         state.card_catalog[unit.card_no].color == card.color for unit in player.battlefield
     ):
-        return False
+        return "color_requirement_not_met"
     if card_no == "1-0-081" and not own_unit_is_attacker:
-        return False
-    return card_no in {"1-0-065", "1-0-074", "1-0-081", "1-0-096"}
+        return "attacker_only"
+    if card_no not in {"1-0-065", "1-0-074", "1-0-081", "1-0-096"}:
+        return "effect_not_implemented"
+    return None
+
+
+def _get_disabled_reason_message(disabled_reason: str) -> str:
+    messages = {
+        "unit_exhausted": "行動済みユニットのため選べません。",
+        "not_enough_cp": "CPが足りないため使えません。",
+        "color_requirement_not_met": "同属性ユニットが場にいないため使えません。",
+        "attacker_only": "攻撃側のときだけ使えます。",
+        "effect_not_implemented": "この効果はまだ未実装です。",
+        "not_intercept_card": "インターセプトカードではありません。",
+    }
+    return messages.get(disabled_reason, "この選択肢は現在選べません。")
 
 
 def _get_intercept_target(card_no: str, own_unit_is_attacker: bool) -> str:
@@ -1110,6 +1247,40 @@ def _get_intercept_target(card_no: str, own_unit_is_attacker: bool) -> str:
     if card_no == "1-0-081" and own_unit_is_attacker:
         return "own_unit"
     return "own_unit"
+
+
+def _get_target_label_ja(target: str) -> str:
+    labels = {
+        "own_unit": "自分ユニット",
+        "enemy_unit": "相手ユニット",
+    }
+    return labels.get(target, target)
+
+
+def _build_battle_choice_payload(
+    state: MatchState,
+    own_unit: UnitState,
+    enemy_unit: UnitState,
+    own_unit_is_attacker: bool,
+) -> dict[str, Any]:
+    return {
+        "own_unit": {
+            "card_no": own_unit.card_no,
+            "card_name": state.card_catalog[own_unit.card_no].name,
+            "level": own_unit.level,
+            "current_bp": get_unit_bp(state, own_unit),
+            "current_damage": own_unit.current_damage,
+            "is_attacker": own_unit_is_attacker,
+        },
+        "opposing_unit": {
+            "card_no": enemy_unit.card_no,
+            "card_name": state.card_catalog[enemy_unit.card_no].name,
+            "level": enemy_unit.level,
+            "current_bp": get_unit_bp(state, enemy_unit),
+            "current_damage": enemy_unit.current_damage,
+            "is_attacker": not own_unit_is_attacker,
+        },
+    }
 
 
 def _resolve_intercept_effect(

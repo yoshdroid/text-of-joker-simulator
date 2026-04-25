@@ -6,8 +6,11 @@ from tojs.game import (
     apply_action,
     apply_attack_action,
     apply_intercept_action,
+    build_block_choice_payload,
+    build_intercept_choice_payload,
     build_state_update_payload,
     create_match_state,
+    list_available_block_actions,
     list_available_intercept_actions,
     list_available_actions,
     start_turn,
@@ -649,6 +652,147 @@ class GameStateTest(unittest.TestCase):
         state.players["P1"].battlefield = [attacker]
         yes_actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
         self.assertTrue(any(action["kind"] == "use_intercept" for action in yes_actions))
+
+    # blocker 選択肢には UI 表示に使える名前と BP 情報が含まれることを確認する。
+    def test_list_available_block_actions_includes_choice_metadata(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=1, level=2, exhausted=False, attack_restricted=False, current_damage=1000)
+        ]
+
+        actions = list_available_block_actions(state, "P1")
+        block_action = next(action for action in actions if action["kind"] == "block")
+
+        self.assertEqual(block_action["card_name"], "Red Unit 1")
+        self.assertEqual(block_action["current_bp"], 4000)
+        self.assertIn("choice_label", block_action)
+        self.assertIn("choice_summary", block_action)
+        self.assertEqual(block_action["choice_label_ja"], "Red Unit 1でブロック")
+        self.assertIn("BP 4000", block_action["choice_summary_ja"])
+
+    # exhausted ユニットしかいない場合、block choice payload に選べない理由が含まれることを確認する。
+    def test_build_block_choice_payload_includes_unavailable_reason(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        ]
+
+        payload = build_block_choice_payload(state, "P1")
+
+        self.assertEqual(payload["choice_kind"], "block")
+        self.assertEqual(payload["available_choices"][0]["kind"], "no_block")
+        self.assertEqual(payload["unavailable_choices"][0]["disabled_reason"], "unit_exhausted")
+        self.assertEqual(
+            payload["unavailable_choices"][0]["disabled_reason_message"],
+            "行動済みユニットのため選べません。",
+        )
+
+    # intercept 選択肢には UI 表示に使えるカード名と説明が含まれることを確認する。
+    def test_list_available_intercept_actions_includes_choice_metadata(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [attacker]
+        state.players["P1"].trigger_zone = ["1-0-074"]
+
+        actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
+        intercept_action = next(action for action in actions if action["kind"] == "use_intercept")
+
+        self.assertEqual(intercept_action["card_name"], "Hero Sword")
+        self.assertEqual(intercept_action["cost"], 0)
+        self.assertIn("choice_label", intercept_action)
+        self.assertIn("choice_summary", intercept_action)
+        self.assertEqual(intercept_action["choice_label_ja"], "Hero Swordを使う")
+        self.assertEqual(intercept_action["choice_summary_ja"], "CP 0 / 対象 自分ユニット")
+
+    # intercept が使えない場合でも payload に選べない理由が含まれることを確認する。
+    def test_build_intercept_choice_payload_includes_unavailable_reason(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = []
+        state.players["P1"].current_cp = 0
+        state.players["P1"].trigger_zone = ["1-0-065", "1-0-081"]
+
+        payload = build_intercept_choice_payload(state, "P1", attacker, blocker, True)
+
+        self.assertEqual(payload["choice_kind"], "intercept")
+        self.assertEqual(payload["available_choices"][0]["kind"], "no_intercept")
+        self.assertEqual(len(payload["unavailable_choices"]), 2)
+        self.assertEqual(payload["unavailable_choices"][0]["disabled_reason"], "not_enough_cp")
+        self.assertEqual(payload["unavailable_choices"][1]["disabled_reason"], "color_requirement_not_met")
+        self.assertEqual(
+            payload["unavailable_choices"][0]["disabled_reason_message"],
+            "CPが足りないため使えません。",
+        )
+        self.assertEqual(
+            payload["unavailable_choices"][1]["disabled_reason_message"],
+            "同属性ユニットが場にいないため使えません。",
+        )
+
+    # 対象選択を伴う能力では choice_request に choice_kind と表示用情報が含まれることを確認する。
+    def test_targeted_ability_choice_request_includes_choice_metadata(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-004", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        )
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+        captured_payloads: list[dict[str, object]] = []
+
+        def choice_resolver(_player_id, payload):
+            captured_payloads.append(payload)
+            return {"kind": "choose_unit", "target_index": 0}
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            rng=random.Random(7),
+            choice_resolver=choice_resolver,
+        )
+
+        self.assertEqual(captured_payloads[0]["choice_kind"], "target_unit")
+        first_choice = captured_payloads[0]["available_choices"][0]
+        self.assertEqual(first_choice["card_name"], "Blue Unit 1")
+        self.assertIn("choice_label", first_choice)
+        self.assertEqual(first_choice["choice_label_ja"], "Blue Unit 1を対象にする")
+
+    # 手札コスト選択を伴う能力では choice_request に choice_kind と表示用情報が含まれることを確認する。
+    def test_hand_discard_choice_request_includes_choice_metadata(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].hand = ["1-0-002", "1-0-003"]
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-010", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        )
+        captured_payloads: list[dict[str, object]] = []
+
+        def choice_resolver(_player_id, payload):
+            captured_payloads.append(payload)
+            return {"kind": "discard_hand", "hand_index": 1}
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            rng=random.Random(7),
+            choice_resolver=choice_resolver,
+        )
+
+        self.assertEqual(captured_payloads[0]["choice_kind"], "discard_hand")
+        first_choice = captured_payloads[0]["available_choices"][0]
+        self.assertEqual(first_choice["card_name"], "Red Unit 2")
+        self.assertIn("choice_label", first_choice)
+        self.assertEqual(first_choice["choice_label_ja"], "Red Unit 2を捨てる")
 
     # overdrive では対象ユニットを evolution に置き換え、元ユニットを捨札へ送ることを確認する。
     def test_apply_overdrive_action(self) -> None:

@@ -273,6 +273,58 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].trigger_zone, [])
         self.assertEqual(state.players["P2"].trigger_zone, [])
 
+    # 使用不能な intercept しかなくても、理由つきの choice_request が送られることを確認する。
+    def test_battle_intercept_sends_unavailable_reasons(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-001"] * 40,
+            ["1-0-001"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].trigger_zone = ["1-0-081"]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
+            }
+        )
+        second_player = FakePlayerProcess(
+            {
+                "choice_request": [
+                    {"kind": "block", "blocker_index": 0},
+                    {"kind": "no_intercept"},
+                ],
+            }
+        )
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        intercept_messages = [
+            message
+            for message in second_player.received_messages
+            if message.type == "choice_request" and message.payload.get("choice_kind") == "intercept"
+        ]
+        self.assertEqual(len(intercept_messages), 1)
+        self.assertEqual(
+            intercept_messages[0].payload["unavailable_choices"][0]["disabled_reason"],
+            "attacker_only",
+        )
+        self.assertEqual(
+            intercept_messages[0].payload["unavailable_choices"][0]["disabled_reason_message"],
+            "攻撃側のときだけ使えます。",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

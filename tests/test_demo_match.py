@@ -24,8 +24,11 @@ class DemoMatchTest(unittest.TestCase):
         self.assertEqual(payload["snapshots"][1]["turn_player_id"], "P1")
         self.assertEqual(payload["snapshots"][1]["players"]["P1"]["battlefield_count"], 1)
         self.assertGreater(len(payload["messages"]), 0)
+        self.assertGreater(len(payload["rendered_messages"]), 0)
         self.assertEqual(payload["messages"][0]["direction"], "to_player")
         self.assertEqual(payload["messages"][1]["direction"], "from_player")
+        self.assertTrue(payload["rendered_messages"][0].startswith("[R"))
+        self.assertIn("hello", payload["rendered_messages"][0])
 
 
 if __name__ == "__main__":

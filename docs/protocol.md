@@ -37,6 +37,27 @@ The machine-facing protocol stays JSON. For human-facing logs, the engine can re
 - a blocker
 - an intercept to use, or to pass
 
+Each entry in `available_choices` may also include UI-oriented metadata such as:
+
+- `choice_label`
+- `choice_summary`
+- `choice_label_ja`
+- `choice_summary_ja`
+- `card_name`
+- `current_bp`
+- `current_damage`
+
+When a candidate exists but is currently unusable, `choice_request` may also include `unavailable_choices`.
+Each unavailable choice can carry a `disabled_reason` such as:
+
+- `unit_exhausted`
+- `not_enough_cp`
+- `color_requirement_not_met`
+- `attacker_only`
+- `effect_not_implemented`
+
+For immediate display use, unavailable choices may also include `disabled_reason_message` in Japanese.
+
 Intercept choices can be requested multiple times in one battle. The attacker and defender alternate until both pass consecutively. A used intercept leaves `trigger_zone` and moves to the discard pile after effect resolution.
 
 ## Starter Python Bot Flow

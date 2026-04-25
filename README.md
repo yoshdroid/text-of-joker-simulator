@@ -28,6 +28,8 @@ python -m tojs.bot --deck configs/decks/example_deck.json
 python -m tojs.demo_match --cycles 2 --seed 7
 ```
 
+`demo_match` の出力 JSON には、生の `messages` に加えて、日本語表示を含む `rendered_messages` も入ります。
+
 ## 主要ファイル
 
 - `configs/regulation.default.json`: レギュレーションのひな形

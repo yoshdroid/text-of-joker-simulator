@@ -38,6 +38,10 @@ Current uses:
 - blocker selection
 - intercept selection
 
+For UI or richer bot implementations, each choice can carry display metadata such as card name, BP, damage, and a short label/summary.
+The engine now also provides Japanese display helpers like `choice_label_ja`, `choice_summary_ja`, and `disabled_reason_message`.
+If a card or unit is relevant but currently unusable, the engine can also send it through `unavailable_choices` with a machine-readable `disabled_reason`.
+
 For tests or simple local runs, the first legal option can be auto-selected.
 
 ## Current Implemented Events

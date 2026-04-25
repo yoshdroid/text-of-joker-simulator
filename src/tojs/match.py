@@ -10,6 +10,8 @@ from .game import (
     MatchState,
     apply_action,
     apply_mulligan,
+    build_block_choice_payload,
+    build_intercept_choice_payload,
     build_state_update_payload,
     create_match_state,
     declare_attack_action,
@@ -168,15 +170,12 @@ def play_single_action_cycle(
 
         block_actions = list_available_block_actions(state, defender_id)
         block_payload = {"kind": "no_block"}
-        if any(action.get("kind") == "block" for action in block_actions):
-            block_payload = choice_resolver(
-                defender_id,
-                {
-                    "choice_kind": "block",
-                    "prompt": "Choose a blocker or no block.",
-                    "available_choices": block_actions,
-                },
-            )
+        block_choice_payload = build_block_choice_payload(state, defender_id)
+        if (
+            any(action.get("kind") == "block" for action in block_actions)
+            or block_choice_payload.get("unavailable_choices")
+        ):
+            block_payload = choice_resolver(defender_id, block_choice_payload)
 
         if block_payload.get("kind") == "block":
             attacker = state.players[actor_id].battlefield[action_response.payload["attacker_index"]]
@@ -279,28 +278,22 @@ def _request_battle_intercepts(
         player_id, own_unit_is_attacker = battle_order[order_index % 2]
         own_unit = attacker if own_unit_is_attacker else blocker
         enemy_unit = blocker if own_unit_is_attacker else attacker
-        available_actions = list_available_intercept_actions(
+        choice_payload = build_intercept_choice_payload(
             state,
             player_id,
             own_unit,
             enemy_unit,
             own_unit_is_attacker,
         )
+        available_actions = choice_payload["available_choices"]
         if not any(action.get("kind") == "use_intercept" for action in available_actions):
-            pass_count += 1
-            order_index += 1
-            continue
+            if not choice_payload.get("unavailable_choices"):
+                pass_count += 1
+                order_index += 1
+                continue
         request_serial += 1
-        chosen_action = choice_resolver(
-            player_id,
-            {
-                "choice_kind": "intercept",
-                "request_serial": request_serial,
-                "prompt": "Choose an intercept or pass.",
-                "available_choices": available_actions,
-                "battle": _build_intercept_battle_payload(state, own_unit, enemy_unit, own_unit_is_attacker),
-            },
-        )
+        choice_payload["request_serial"] = request_serial
+        chosen_action = choice_resolver(player_id, choice_payload)
         apply_intercept_action(
             state,
             player_id,
@@ -314,25 +307,3 @@ def _request_battle_intercepts(
         else:
             pass_count += 1
         order_index += 1
-
-
-def _build_intercept_battle_payload(
-    state: MatchState,
-    own_unit: Any,
-    enemy_unit: Any,
-    own_unit_is_attacker: bool,
-) -> dict[str, Any]:
-    return {
-        "own_unit": {
-            "card_no": own_unit.card_no,
-            "level": own_unit.level,
-            "current_bp": get_unit_bp(state, own_unit),
-            "is_attacker": own_unit_is_attacker,
-        },
-        "opposing_unit": {
-            "card_no": enemy_unit.card_no,
-            "level": enemy_unit.level,
-            "current_bp": get_unit_bp(state, enemy_unit),
-            "is_attacker": not own_unit_is_attacker,
-        },
-    }
