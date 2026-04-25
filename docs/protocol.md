@@ -40,6 +40,7 @@
 - `mulligan_decision`
 - `state_update`
 - `request_action`
+- `block_request`
 - `action`
 - `result`
 - `error`
@@ -102,8 +103,19 @@
   "request_id": "action-1-P1",
   "payload": {
     "available_actions": [
+      {"kind": "set_trigger", "hand_index": 0, "card_no": "1-0-001"},
+      {"kind": "drive", "hand_index": 1, "card_no": "1-0-002", "cost": 0, "trigger_reducer_index": 0},
       {"kind": "end_turn"}
     ]
   }
 }
 ```
+
+## 追加した基本アクション
+
+- `set_trigger`: 手札からカードを trigger_zone の右端へ置く
+- `drive`: 現在は unit 限定で場へ出す
+- `attack`: 現在はプレイヤーアタックのみ
+- `block_request`: 防御側が 1 体だけ blocker を選ぶ
+
+unit / evolution カードが trigger_zone にあり、同属性 unit を `drive` する場合は、左から最初に見つかった 1 枚が強制的に使われ、コストを 1 軽減してから捨札へ送られます。

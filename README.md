@@ -10,6 +10,7 @@
 - `stdio` ベースの JSON Lines 通信フォーマット
 - Python 製プレイヤー bot のひな形
 - 初期手札配布、マリガン、ターン開始、`end_turn` までの最小進行
+- `set_trigger` と同属性ユニットのコスト 1 軽減
 - ログ表示向けイベント行フォーマットの提案実装
 - TDD を進めるための `unittest` テスト群
 
@@ -59,9 +60,12 @@ python -m tojs.demo_match --cycles 2 --seed 7
 - マリガン確認
 - 先攻 1 ターン目開始
 - `state_update` 配信
+- `set_trigger`
+- 同属性 trigger_zone カードによる `drive` コスト軽減
 - `request_action` に対する `end_turn`
 
-まだ `drive`、`attack`、`block`、`trigger/intercept` は未実装です。
+すでに `drive`、`attack`、`block` は最小実装済みです。
+まだ `進化`、`trigger card 固有発火`、`intercept`、`能力解決` は未実装です。
 
 ## 挙動確認コマンド
 
@@ -72,3 +76,4 @@ python -m tojs.demo_match --cycles 2 --seed 7
 ```
 
 `boot` 時点では先攻手札 4 枚のまま、後攻へターンが移ると後攻手札が 6 枚になるはずです。
+行動が進むと `battlefield_count` と `trigger_zone_count` の増減で、召喚やセットの動きも追えます。

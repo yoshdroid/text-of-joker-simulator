@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from tojs.bot import SimpleBot, load_deck
+from tojs.bot import SimpleBot, choose_action, load_deck
 from tojs.protocol import Message
 
 
@@ -38,7 +38,35 @@ class BotTest(unittest.TestCase):
         self.assertEqual(response.type, "action")
         self.assertEqual(response.payload["kind"], "attack")
 
+    # block_request ではブロック可能なら最初の blocker を返すことを確認する。
+    def test_handle_block_request(self) -> None:
+        bot = SimpleBot(deck_card_nos=["1-0-001"] * 40)
+
+        response = bot.handle(
+            Message(
+                type="block_request",
+                request_id="block-1",
+                payload={"available_actions": [{"kind": "no_block"}, {"kind": "block", "blocker_index": 0}]},
+            )
+        )
+
+        self.assertEqual(response.type, "block_action")
+        self.assertEqual(response.payload["kind"], "block")
+
+    # bot は overdrive を最優先し、次に drive を選ぶことを確認する。
+    def test_choose_action_prefers_overdrive(self) -> None:
+        chosen = choose_action(
+            [
+                {"kind": "set_trigger", "hand_index": 0},
+                {"kind": "attack", "attacker_index": 0},
+                {"kind": "drive", "hand_index": 1},
+                {"kind": "overdrive", "hand_index": 2, "target_index": 0},
+                {"kind": "end_turn"},
+            ]
+        )
+
+        self.assertEqual(chosen["kind"], "overdrive")
+
 
 if __name__ == "__main__":
     unittest.main()
-

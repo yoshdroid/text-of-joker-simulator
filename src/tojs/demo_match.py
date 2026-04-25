@@ -51,9 +51,16 @@ def main() -> int:
     context = bootstrap(Path(args.cardpool), Path(args.regulation))
     first_player = PlayerProcess(build_python_bot_command(Path(args.deck1)), cwd=".")
     second_player = PlayerProcess(build_python_bot_command(Path(args.deck2)), cwd=".")
+    trace_log: list[dict[str, object]] = []
 
     try:
-        result = run_boot_sequence(context, first_player, second_player, seed=args.seed)
+        result = run_boot_sequence(
+            context,
+            first_player,
+            second_player,
+            seed=args.seed,
+            trace_log=trace_log,
+        )
         snapshots = [_build_snapshot("boot", result.match_state)]
         for cycle_index in range(args.cycles):
             play_single_action_cycle(
@@ -61,10 +68,21 @@ def main() -> int:
                 first_player,
                 second_player,
                 seed=args.seed + cycle_index,
+                trace_log=trace_log,
             )
             snapshots.append(_build_snapshot(f"cycle_{cycle_index + 1}", result.match_state))
 
-        print(json.dumps({"status": "ok", "snapshots": snapshots}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "snapshots": snapshots,
+                    "messages": trace_log,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     finally:
         first_player.close()
         second_player.close()
@@ -87,6 +105,8 @@ def _build_snapshot(label: str, state: object) -> dict[str, object]:
                 "current_cp": player.current_cp,
                 "hand_count": len(player.hand),
                 "deck_count": len(player.draw_pile),
+                "battlefield_count": len(player.battlefield),
+                "trigger_zone_count": len(player.trigger_zone),
             }
             for player_id, player in state.players.items()
         },
@@ -95,4 +115,3 @@ def _build_snapshot(label: str, state: object) -> dict[str, object]:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

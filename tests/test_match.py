@@ -26,15 +26,17 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertEqual(len(result.match_state.players["P1"].hand), 4)
         self.assertEqual(result.match_state.players["P1"].current_cp, 2)
 
-    # bot の既定行動 end_turn により、1 アクションぶん進行できることを確認する。
+    # bot の既定行動ではまず drive が選ばれ、先攻ターン中に盤面が進むことを確認する。
     def test_play_single_action_cycle(self) -> None:
         result = run_boot_sequence(self.context, self.first_player, self.second_player, seed=7)
 
         state = play_single_action_cycle(result.match_state, self.first_player, self.second_player, seed=7)
 
-        self.assertEqual(state.turn_player_id, "P2")
+        self.assertEqual(state.turn_player_id, "P1")
         self.assertEqual(state.round_no, 1)
-        self.assertEqual(state.turn_serial, 2)
+        self.assertEqual(state.turn_serial, 1)
+        self.assertEqual(len(state.players["P1"].battlefield), 1)
+        self.assertEqual(state.players["P1"].current_cp, 1)
 
 
 if __name__ == "__main__":

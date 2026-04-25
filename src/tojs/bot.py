@@ -43,9 +43,21 @@ class SimpleBot:
             )
         if message.type == "request_action":
             available_actions = message.payload.get("available_actions", [])
-            chosen_action = available_actions[0] if available_actions else {"kind": "end_turn"}
+            chosen_action = choose_action(available_actions)
             return Message(
                 type="action",
+                request_id=message.request_id,
+                payload=chosen_action,
+            )
+        if message.type == "block_request":
+            available_actions = message.payload.get("available_actions", [])
+            chosen_action = {"kind": "no_block"}
+            for action in available_actions:
+                if action.get("kind") == "block":
+                    chosen_action = action
+                    break
+            return Message(
+                type="block_action",
                 request_id=message.request_id,
                 payload=chosen_action,
             )
@@ -58,6 +70,22 @@ class SimpleBot:
 
 def load_deck(path: str | Path) -> list[str]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def choose_action(available_actions: list[dict[str, object]]) -> dict[str, object]:
+    priorities = {
+        "overdrive": 0,
+        "drive": 1,
+        "attack": 2,
+        "set_trigger": 3,
+        "end_turn": 4,
+    }
+    if not available_actions:
+        return {"kind": "end_turn"}
+    return min(
+        available_actions,
+        key=lambda action: (priorities.get(str(action.get("kind")), 99), available_actions.index(action)),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

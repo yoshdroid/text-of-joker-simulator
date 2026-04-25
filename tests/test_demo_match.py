@@ -21,7 +21,11 @@ class DemoMatchTest(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["snapshots"][0]["turn_player_id"], "P1")
         self.assertEqual(payload["snapshots"][0]["players"]["P1"]["hand_count"], 4)
-        self.assertEqual(payload["snapshots"][1]["turn_player_id"], "P2")
+        self.assertEqual(payload["snapshots"][1]["turn_player_id"], "P1")
+        self.assertEqual(payload["snapshots"][1]["players"]["P1"]["battlefield_count"], 1)
+        self.assertGreater(len(payload["messages"]), 0)
+        self.assertEqual(payload["messages"][0]["direction"], "to_player")
+        self.assertEqual(payload["messages"][1]["direction"], "from_player")
 
 
 if __name__ == "__main__":
