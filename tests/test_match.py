@@ -31,7 +31,6 @@ class FakePlayerProcess:
             "deck_submit": "deck_submit",
             "mulligan_decision": "mulligan_decision",
             "request_action": "action",
-            "intercept_request": "intercept_action",
             "choice_request": "choice_response",
         }[message.type]
         return Message(type=response_type, request_id=message.request_id, payload=payload)
@@ -161,7 +160,7 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertEqual(state.players["P2"].battlefield[1].current_damage, 1000)
         self.assertEqual(state.players["P2"].battlefield[0].current_damage, 0)
 
-    # ブロック成立後は戦闘前に intercept_request が送られ、使用した intercept の効果が戦闘結果に反映されることを確認する
+    # ブロック成立後は戦闘前に intercept 用の choice_request が送られ、効果が戦闘結果に反映されることを確認する
     def test_battle_intercept_is_requested_before_combat_damage(self) -> None:
         card_catalog = {card.card_no: card for card in self.context.cardpool}
         state = create_match_state(
@@ -185,7 +184,7 @@ class MatchRunnerTest(unittest.TestCase):
         first_player = FakePlayerProcess(
             {
                 "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
-                "intercept_request": [{"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"}],
+                "choice_request": [{"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"}],
             }
         )
         second_player = FakePlayerProcess(
@@ -196,7 +195,12 @@ class MatchRunnerTest(unittest.TestCase):
 
         play_single_action_cycle(state, first_player, second_player, seed=7)
 
-        self.assertTrue(any(message.type == "intercept_request" for message in first_player.received_messages))
+        self.assertTrue(
+            any(
+                message.type == "choice_request" and message.payload.get("choice_kind") == "intercept"
+                for message in first_player.received_messages
+            )
+        )
         self.assertEqual(len(state.players["P1"].battlefield), 1)
         self.assertEqual(len(state.players["P2"].battlefield), 0)
 
@@ -227,7 +231,7 @@ class MatchRunnerTest(unittest.TestCase):
         first_player = FakePlayerProcess(
             {
                 "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
-                "intercept_request": [
+                "choice_request": [
                     {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"},
                     {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-081"},
                 ],
@@ -235,8 +239,8 @@ class MatchRunnerTest(unittest.TestCase):
         )
         second_player = FakePlayerProcess(
             {
-                "choice_request": [{"kind": "block", "blocker_index": 0}],
-                "intercept_request": [
+                "choice_request": [
+                    {"kind": "block", "blocker_index": 0},
                     {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-065"},
                 ],
             }
@@ -245,11 +249,23 @@ class MatchRunnerTest(unittest.TestCase):
         play_single_action_cycle(state, first_player, second_player, seed=7)
 
         self.assertEqual(
-            len([message for message in first_player.received_messages if message.type == "intercept_request"]),
+            len(
+                [
+                    message
+                    for message in first_player.received_messages
+                    if message.type == "choice_request" and message.payload.get("choice_kind") == "intercept"
+                ]
+            ),
             2,
         )
         self.assertEqual(
-            len([message for message in second_player.received_messages if message.type == "intercept_request"]),
+            len(
+                [
+                    message
+                    for message in second_player.received_messages
+                    if message.type == "choice_request" and message.payload.get("choice_kind") == "intercept"
+                ]
+            ),
             1,
         )
         self.assertEqual(len(state.players["P1"].battlefield), 1)

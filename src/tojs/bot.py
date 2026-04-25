@@ -49,18 +49,6 @@ class SimpleBot:
                 request_id=message.request_id,
                 payload=chosen_action,
             )
-        if message.type == "intercept_request":
-            available_actions = message.payload.get("available_actions", [])
-            chosen_action = {"kind": "no_intercept"}
-            for action in available_actions:
-                if action.get("kind") == "use_intercept":
-                    chosen_action = action
-                    break
-            return Message(
-                type="intercept_action",
-                request_id=message.request_id,
-                payload=chosen_action,
-            )
         if message.type == "choice_request":
             chosen_choice = choose_choice(message.payload)
             return Message(
@@ -115,6 +103,11 @@ def choose_choice(payload: dict[str, object]) -> dict[str, object]:
             if choice.get("kind") == "block":
                 return choice
         return {"kind": "no_block"}
+    if choice_kind == "intercept":
+        for choice in available_choices:
+            if choice.get("kind") == "use_intercept":
+                return choice
+        return {"kind": "no_intercept"}
     return choose_first_option(available_choices, {"kind": "no_choice"})
 
 

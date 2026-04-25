@@ -1,10 +1,8 @@
 # Protocol
 
-## 基本案
+## Basics
 
-通信は 1 行 1 JSON の `JSON Lines` を採用します。
-
-例:
+Processes communicate over `stdio` using one JSON object per line in `JSON Lines` format.
 
 ```json
 {"type":"hello","request_id":"boot-1","payload":{"player_name":"example-bot","protocol_version":"1"}}
@@ -12,18 +10,7 @@
 {"type":"action","request_id":"turn-3-main","payload":{"kind":"end_turn"}}
 ```
 
-## この方式の利点
-
-- パースが簡単
-- ログ保存しやすい
-- 1 行単位で中継しやすい
-- 将来 WebSocket 等へ移植しやすい
-
-## 見栄えの良いログ案
-
-プロトコル自体は JSON にしつつ、人間向け表示は別フォーマットにするのがおすすめです。
-
-例:
+The machine-facing protocol stays JSON. For human-facing logs, the engine can render a compact event line such as:
 
 ```text
 [R03][P1][REQ] choose_action actions=end_turn,drive,attack
@@ -31,38 +18,36 @@
 [R03][SYS][EVT] life_change player=P2 delta=-1 life=5
 ```
 
-この方式なら通信の堅牢性は JSON に任せつつ、実況ログだけ格好よく整えられます。
-
-## メッセージ種別の最小セット
+## Message Types
 
 - `hello`
 - `deck_submit`
 - `mulligan_decision`
 - `state_update`
 - `request_action`
-- `intercept_request`
 - `choice_request`
 - `action`
 - `result`
 - `error`
 
-`intercept_request` は戦闘中に複数回届く場合があります。
-攻撃側と防御側が交互に、双方が続けて使用しないと返すまで繰り返されます。
-`use_intercept` で使用したカードは、効果解決後に trigger zone から取り除かれ、捨札へ移動します。
+`choice_request` is the unified selection message. It is used when a player must choose:
 
-`choice_request` は、能力解決中に対象やコスト支払い用カードを選ぶ必要がある時に届きます。
-現在は、対象ユニットの選択、手札から捨てるカードの選択、ブロッカー選択に使っています。
+- an ability target
+- a hand card for a discard cost
+- a blocker
+- an intercept to use, or to pass
 
-## Python bot ひな形の基本フロー
+Intercept choices can be requested multiple times in one battle. The attacker and defender alternate until both pass consecutively. A used intercept leaves `trigger_zone` and moves to the discard pile after effect resolution.
 
-1. `hello` を受けたら bot 名と対応プロトコルを返す
-2. `deck_submit` を受けたらデッキ一覧を返す
-3. `mulligan_decision` を受けたら既定では `false` を返す
-4. `request_action` を受けたら、候補の先頭を選ぶ
+## Starter Python Bot Flow
 
-この挙動にしておくと、今後の強化時に「合法手探索」へ差し替えやすくなります。
+1. Reply to `hello` with bot name and protocol version.
+2. Reply to `deck_submit` with the deck list.
+3. Reply to `mulligan_decision` with `false` by default.
+4. Reply to `request_action` by choosing one legal action.
+5. Reply to `choice_request` by choosing one legal option.
 
-## `state_update` の最小スキーマ
+## Example `state_update`
 
 ```json
 {
@@ -101,9 +86,9 @@
 }
 ```
 
-この例では、先攻 1 ターン目ドローは特例ではなくレギュレーションの `opening_draws.first[0]` に従います。
+For the first player on round 1, the opening draw count follows `opening_draws.first[0]`.
 
-## `request_action` の最小スキーマ
+## Example `request_action`
 
 ```json
 {
@@ -119,11 +104,14 @@
 }
 ```
 
-## 追加した基本アクション
+## Implemented Actions
 
-- `set_trigger`: 手札からカードを trigger_zone の右端へ置く
-- `drive`: 現在は unit 限定で場へ出す
-- `attack`: 現在はプレイヤーアタックのみ
-- `choice_request`: 防御側が 1 体だけ blocker を選ぶ
+- `set_trigger`: place a card from hand into the leftmost open trigger slot
+- `drive`: play a unit onto the battlefield
+- `overdrive`: evolve onto a same-color unit already on the battlefield
+- `override`: combine same-name cards in hand to raise level and draw 1
+- `attack`: declare an attack
+- `choice_request` with `choice_kind: "block"`: defender chooses one blocker or `no_block`
+- `choice_request` with `choice_kind: "intercept"`: current player chooses one intercept or `no_intercept`
 
-unit / evolution カードが trigger_zone にあり、同属性 unit を `drive` する場合は、左から最初に見つかった 1 枚が強制的に使われ、コストを 1 軽減してから捨札へ送られます。
+When a unit or evolution card in `trigger_zone` matches the color of a newly played unit, the leftmost matching card is consumed automatically, reduces cost by 1, and moves to the discard pile.

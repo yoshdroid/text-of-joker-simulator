@@ -267,6 +267,7 @@ def _request_battle_intercepts(
     blocker: Any,
     trace_log: TraceLog | None,
 ) -> None:
+    choice_resolver = _build_choice_resolver(players, trace_log)
     battle_order = [
         (attacker_id, True),
         (defender_id, False),
@@ -290,28 +291,25 @@ def _request_battle_intercepts(
             order_index += 1
             continue
         request_serial += 1
-        response = _request_with_trace(
-            players[player_id],
+        chosen_action = choice_resolver(
             player_id,
-            Message(
-                type="intercept_request",
-                request_id=f"intercept-{state.turn_serial}-{player_id}-{request_serial}",
-                payload={
-                    "available_actions": available_actions,
-                    "battle": _build_intercept_battle_payload(state, own_unit, enemy_unit, own_unit_is_attacker),
-                },
-            ),
-            trace_log,
+            {
+                "choice_kind": "intercept",
+                "request_serial": request_serial,
+                "prompt": "Choose an intercept or pass.",
+                "available_choices": available_actions,
+                "battle": _build_intercept_battle_payload(state, own_unit, enemy_unit, own_unit_is_attacker),
+            },
         )
         apply_intercept_action(
             state,
             player_id,
-            response.payload,
+            chosen_action,
             own_unit,
             enemy_unit,
             own_unit_is_attacker,
         )
-        if response.payload.get("kind") == "use_intercept":
+        if chosen_action.get("kind") == "use_intercept":
             pass_count = 0
         else:
             pass_count += 1

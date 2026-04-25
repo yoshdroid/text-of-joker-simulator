@@ -1,84 +1,89 @@
 # Ability System
 
-現在の能力処理は、個別処理を場当たりで分岐させるのではなく、イベント駆動で解決する形にしています。
+## Core Idea
 
-## 基本方針
+This project handles timing-based effects with an event-driven queue.
 
-1. ゲーム中の出来事を `AbilityEvent` として発行する
-2. そのイベントで誘発する能力を順番に集める
-3. 誘発した能力を 1 つずつ解決する
-4. 能力解決で新しいイベントが出たら、同じキューの後ろに積む
+1. A game event occurs.
+2. The engine emits an `AbilityEvent`.
+3. Matching abilities are collected.
+4. Abilities resolve one by one in FIFO order.
+5. If resolution creates new events, they are appended to the queue.
 
-この形にしておくと、能力が増えても `if` の入れ子で壊れにくくなります。
+This keeps timing rules explicit and makes it easier to extend card support one card at a time.
 
-対象選択や手札コスト選択、ブロッカー選択が必要な場面は、`choice_request` を通してプレイヤーへ問い合わせます。
-単体テストや簡易実行では、選択肢の先頭を自動選択します。
+## Why This Shape Works
 
-## 今の実装単位
+The hard part in card game engines is usually not the effect itself, but the order of:
+
+- when a trigger is created
+- when players may choose targets or costs
+- when combat continues after a change in board state
+
+Using an event queue lets us separate:
+
+- event detection
+- player choice requests
+- effect resolution
+- follow-up events
+
+## Current Player Choice Model
+
+Whenever the engine needs player input, it uses `choice_request`.
+
+Current uses:
+
+- targeted abilities
+- hand discard cost selection
+- blocker selection
+- intercept selection
+
+For tests or simple local runs, the first legal option can be auto-selected.
+
+## Current Implemented Events
 
 - `unit_entered`
-  ユニットが場に出た時
 - `unit_attacked`
-  ユニットがアタック宣言した時
 - `player_attack_success`
-  プレイヤーへの攻撃が通った時
 - `unit_overclocked`
-  ユニットが Lv.3 になった時
 - `turn_end`
-  ターン終了時
 
-## 解決順
+## Current Resolution Rules
 
-- アタック時能力は、アタック宣言の直後に必ず先に解決します
-- その結果で盤面が変わったあとに、相手はブロッカーを選びます
-- この時点でブロッカーが 1 体もいなければ、その攻撃はノーブロックになります
-- 発火元ユニット自身の能力は、そのイベントに対して先に確認します
-- `unit_entered` では、同プレイヤーの trigger zone を左から順に確認します
-- `turn_end` では、同プレイヤーの battlefield を左から順に確認します
-- 能力の解決中に新しいイベントが出た場合は FIFO で後ろに積みます
+- Attack-triggered abilities resolve immediately after attack declaration.
+- Blocker selection happens only after those attack-triggered abilities finish.
+- If no legal blocker remains at that point, the battle is treated as `no_block`.
+- Intercepts are only offered when a battle is actually going to happen.
+- Intercepts are requested with `choice_request`, attacker first and defender second.
+- After that, attacker and defender continue alternating until both pass consecutively.
+- A used intercept leaves `trigger_zone` and moves to the discard pile after resolution.
 
-## いまの割り切り
+## Current Implemented Effect Shapes
 
-まだ全文字列の能力 JSON を汎用解釈する段階には入っていません。
-現時点では「カード番号 + 発火イベント」で処理関数を結び、優先度や順序の土台を先に安定させています。
+- on-enter damage
+- on-enter BP gain
+- on-enter enemy BP reduction
+- on-attack BP gain
+- on-attack damage
+- discard-cost-then-buff
+- player attack success consuming enemy trigger zone
+- overclock stat change
+- end-turn readiness recovery
+- battle-time intercept BP modifiers
 
-この段階で重要なのは、能力本文を完全再現することよりも、
+## Trigger Rules Implemented
 
-- いつ誘発するか
-- どの順に並ぶか
-- 解決中に盤面が変わった時にどう扱うか
+- Trigger cards are checked from left to right.
+- A trigger that resolves successfully is consumed and sent to discard.
+- A trigger that would have no effect stays in `trigger_zone`.
 
-を一貫して扱えることです。
+## Practical Extension Strategy
 
-## 今回入っている能力例
+When adding a new card, implement it in this order:
 
-- 場に出た時 1 ドロー
-- 場に出た時 相手ユニットへ 4000 ダメージ
-- 場に出た時 相手ユニット BP -4000
-- アタック時 BP +2000
-- アタック時 相手ユニットへ 1000 ダメージ
-- アタック時 手札 1 枚を捨てたら BP +4000
-- プレイヤー攻撃成功時 相手 trigger zone 破壊
-- OC 時 相手ライフ -1
-- ターン終了時 行動権回復
-- 戦闘時 intercept による BP 増減
+1. Define the event timing that should create the effect.
+2. Define whether player choice is needed.
+3. Define the exact board mutation.
+4. Add a focused regression test for timing and resolution order.
 
-## Trigger の現在仕様
-
-- `unit_entered` を条件にする trigger は trigger zone を左から順に確認します
-- 効果を解決した trigger は、使用済みとして trigger zone から捨札へ移ります
-- 効果がまったく及ばない場合は発動せず、trigger zone に残ります
-
-## Intercept の現在仕様
-
-- ブロックが成立して戦闘になる時だけ `intercept_request` を出します
-- 先に攻撃側、その後に防御側へ使用確認を出します
-- その後は攻撃側と防御側で交互に、双方が続けてパスするまで確認を続けます
-- 使用した intercept は、効果解決後に trigger zone から消え、捨札へ移ります
-- 実装済みカードは `1-0-065` `1-0-074` `1-0-081` `1-0-096` です
-
-## 実装時の注意
-
-アタック時能力でブロッカー候補が先に破壊されることがあります。
-このケースでは、ブロック選択の前に盤面が更新されるため、相手は残っているユニットだけを見てブロックを選びます。
-残っているブロッカーが 0 体なら、そのままノーブロックで進みます。
+This keeps the engine understandable even as the card pool grows.
