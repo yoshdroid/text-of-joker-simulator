@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from .protocol import Message, read_message, write_message
+
+
+class SimpleBot:
+    def __init__(self, deck_card_nos: list[str], bot_name: str = "python-starter-bot") -> None:
+        self.deck_card_nos = deck_card_nos
+        self.bot_name = bot_name
+
+    def handle(self, message: Message) -> Message:
+        if message.type == "hello":
+            return Message(
+                type="hello",
+                request_id=message.request_id,
+                payload={
+                    "player_name": self.bot_name,
+                    "protocol_version": "1",
+                },
+            )
+        if message.type == "deck_submit":
+            return Message(
+                type="deck_submit",
+                request_id=message.request_id,
+                payload={"deck_card_nos": self.deck_card_nos},
+            )
+        if message.type == "mulligan_decision":
+            return Message(
+                type="mulligan_decision",
+                request_id=message.request_id,
+                payload={"do_mulligan": False},
+            )
+        if message.type == "state_update":
+            return Message(
+                type="state_ack",
+                request_id=message.request_id,
+                payload={"received": True},
+            )
+        if message.type == "request_action":
+            available_actions = message.payload.get("available_actions", [])
+            chosen_action = available_actions[0] if available_actions else {"kind": "end_turn"}
+            return Message(
+                type="action",
+                request_id=message.request_id,
+                payload=chosen_action,
+            )
+        return Message(
+            type="error",
+            request_id=message.request_id,
+            payload={"message": f"unsupported message type: {message.type}"},
+        )
+
+
+def load_deck(path: str | Path) -> list[str]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Simple stdio bot for TOJS")
+    parser.add_argument(
+        "--deck",
+        default="configs/decks/example_deck.json",
+        help="Path to deck json",
+    )
+    parser.add_argument(
+        "--name",
+        default="python-starter-bot",
+        help="Bot display name",
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    bot = SimpleBot(load_deck(args.deck), bot_name=args.name)
+
+    while True:
+        message = read_message(sys.stdin)
+        if message is None:
+            break
+        response = bot.handle(message)
+        write_message(sys.stdout, response)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
