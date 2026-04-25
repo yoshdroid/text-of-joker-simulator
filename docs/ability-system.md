@@ -2,49 +2,19 @@
 
 ## Core Idea
 
-This project handles timing-based effects with an event-driven queue.
+能力処理はイベント駆動です。
 
-1. A game event occurs.
-2. The engine emits an `AbilityEvent`.
-3. Matching abilities are collected.
-4. Abilities resolve one by one in FIFO order.
-5. If resolution creates new events, they are appended to the queue.
+1. 盤面で出来事が起こる
+2. `AbilityEvent` を発行する
+3. そのイベントに反応する能力を集める
+4. FIFO で 1 つずつ解決する
+5. 新しい出来事が出たらキューの後ろへ積む
 
-This keeps timing rules explicit and makes it easier to extend card support one card at a time.
+この形にしている理由は、カードゲームで難しいのが「効果そのもの」よりも「いつ誘発して、どの順で解決するか」だからです。
 
-## Why This Shape Works
+## Current Events
 
-The hard part in card game engines is usually not the effect itself, but the order of:
-
-- when a trigger is created
-- when players may choose targets or costs
-- when combat continues after a change in board state
-
-Using an event queue lets us separate:
-
-- event detection
-- player choice requests
-- effect resolution
-- follow-up events
-
-## Current Player Choice Model
-
-Whenever the engine needs player input, it uses `choice_request`.
-
-Current uses:
-
-- targeted abilities
-- hand discard cost selection
-- blocker selection
-- intercept selection
-
-For UI or richer bot implementations, each choice can carry display metadata such as card name, BP, damage, and a short label/summary.
-The engine now also provides Japanese display helpers like `choice_label_ja`, `choice_summary_ja`, and `disabled_reason_message`.
-If a card or unit is relevant but currently unusable, the engine can also send it through `unavailable_choices` with a machine-readable `disabled_reason`.
-
-For tests or simple local runs, the first legal option can be auto-selected.
-
-## Current Implemented Events
+現在使っている主なイベントは次のとおりです。
 
 - `unit_entered`
 - `unit_attacked`
@@ -52,42 +22,62 @@ For tests or simple local runs, the first legal option can be auto-selected.
 - `unit_overclocked`
 - `turn_end`
 
+## Choice Model
+
+プレイヤー選択は `choice_request` に統一しています。
+
+現在の用途:
+
+- 対象ユニット選択
+- 手札コスト選択
+- ブロック選択
+- インターセプト選択
+
+テストや簡易実行では、choice resolver が無い場合は先頭候補を自動選択します。
+
 ## Current Resolution Rules
 
-- Attack-triggered abilities resolve immediately after attack declaration.
-- Blocker selection happens only after those attack-triggered abilities finish.
-- If no legal blocker remains at that point, the battle is treated as `no_block`.
-- Intercepts are only offered when a battle is actually going to happen.
-- Intercepts are requested with `choice_request`, attacker first and defender second.
-- After that, attacker and defender continue alternating until both pass consecutively.
-- A used intercept leaves `trigger_zone` and moves to the discard pile after resolution.
+- アタック宣言後、アタック時能力を先に解決します
+- その後の盤面でブロック可否を判定します
+- ブロッカーがいなければ `no_block` 扱いです
+- ブロック成立時だけ intercept 選択に入ります
+- intercept は攻撃側から開始し、双方が連続でパスするまで交互です
+- trigger card は左から順に評価します
+- 効果が何も及ばない trigger は場に残します
 
 ## Current Implemented Effect Shapes
 
-- on-enter damage
-- on-enter BP gain
-- on-enter enemy BP reduction
-- on-attack BP gain
-- on-attack damage
-- discard-cost-then-buff
-- player attack success consuming enemy trigger zone
-- overclock stat change
-- end-turn readiness recovery
-- battle-time intercept BP modifiers
+- 登場時ダメージ
+- 登場時ドロー
+- 登場時 BP 減少
+- アタック時 BP 増加
+- アタック時ダメージ
+- 手札コスト支払い後の BP 増加
+- プレイヤーアタック成功時の trigger 破壊
+- overclock 時の追加効果
+- turn_end 時の行動権回復
+- intercept による一時 BP 補正
 
-## Trigger Rules Implemented
+## Current Keyword Support
 
-- Trigger cards are checked from left to right.
-- A trigger that resolves successfully is consumed and sent to discard.
-- A trigger that would have no effect stays in `trigger_zone`.
+- `スピードムーブ`
+  - `drive` したターンでも `attack_restricted` を受けません
+- `不屈`
+  - `turn_end` 時に `exhausted = False`
+- `貫通`
+  - ブロックされた戦闘で攻撃ユニットが勝利した時だけ、相手ライフに 1 ダメージ
 
 ## Practical Extension Strategy
 
-When adding a new card, implement it in this order:
+新しいカードや能力を足すときは、次の順で進めると壊れにくいです。
 
-1. Define the event timing that should create the effect.
-2. Define whether player choice is needed.
-3. Define the exact board mutation.
-4. Add a focused regression test for timing and resolution order.
+1. どのイベントで誘発するか決める
+2. 選択が必要か決める
+3. 盤面変化を小さく実装する
+4. タイミング込みの回帰テストを追加する
 
-This keeps the engine understandable even as the card pool grows.
+## Current Limitation
+
+- まだカードプール全体を網羅していません
+- 汎用 DSL ではなく、個別能力と一部キーワード能力の混成です
+- 対象耐性や消滅などの上位ルールは未実装または簡略実装です

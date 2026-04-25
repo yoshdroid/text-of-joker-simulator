@@ -2,20 +2,13 @@
 
 ## Basics
 
-Processes communicate over `stdio` using one JSON object per line in `JSON Lines` format.
+プロセス間通信は `stdio` 上の JSON Lines です。
+1 行に 1 メッセージを載せます。
 
 ```json
-{"type":"hello","request_id":"boot-1","payload":{"player_name":"example-bot","protocol_version":"1"}}
-{"type":"request_action","request_id":"turn-3-main","payload":{"available_actions":[{"kind":"end_turn"}]}}
-{"type":"action","request_id":"turn-3-main","payload":{"kind":"end_turn"}}
-```
-
-The machine-facing protocol stays JSON. For human-facing logs, the engine can render a compact event line such as:
-
-```text
-[R03][P1][REQ] choose_action actions=end_turn,drive,attack
-[R03][P1][RES] attack attacker=u1 target=player
-[R03][SYS][EVT] life_change player=P2 delta=-1 life=5
+{"type":"hello","request_id":"hello-p1","payload":{"player_name":"example-bot","protocol_version":"1"}}
+{"type":"request_action","request_id":"action-2-3-P1","payload":{"available_actions":[{"kind":"end_turn"}]}}
+{"type":"action","request_id":"action-2-3-P1","payload":{"kind":"end_turn"}}
 ```
 
 ## Message Types
@@ -27,17 +20,90 @@ The machine-facing protocol stays JSON. For human-facing logs, the engine can re
 - `request_action`
 - `choice_request`
 - `action`
-- `result`
+- `choice_response`
+- `state_ack`
 - `error`
 
-`choice_request` is the unified selection message. It is used when a player must choose:
+## Request / Response Pairing
 
-- an ability target
-- a hand card for a discard cost
-- a blocker
-- an intercept to use, or to pass
+- `request_action` と `action` は同じ `request_id` を使います
+- `choice_request` と `choice_response` も同じ `request_id` を使います
+- 現在の `request_id` には `round_no` と `turn_serial` を含めています
 
-Each entry in `available_choices` may also include UI-oriented metadata such as:
+例:
+
+- `action-4-8-P2`
+- `choice-4-8-2-P1`
+
+## `state_update`
+
+`state_update` は各アクションサイクルの冒頭と、必要な途中段階で送られます。
+
+主な項目:
+
+- `round_no`
+- `turn_serial`
+- `turn_player_id`
+- `viewer_player_id`
+- `available_actions`
+- `players`
+- `flags.match_ended`
+
+相手プレイヤー視点では、相手手札の中身は公開しません。
+`trigger_zone` は相手から見ると色だけ見えます。
+
+## `request_action`
+
+ターンプレイヤーに対して合法手一覧を送ります。
+
+現在の主なアクション:
+
+- `set_trigger`
+- `drive`
+- `overdrive`
+- `override`
+- `retreat`
+- `attack`
+- `end_turn`
+
+例:
+
+```json
+{
+  "type": "request_action",
+  "request_id": "action-2-3-P1",
+  "payload": {
+    "available_actions": [
+      {"kind": "set_trigger", "hand_index": 0, "card_no": "1-0-001"},
+      {"kind": "drive", "hand_index": 1, "card_no": "1-0-002", "cost": 0, "trigger_reducer_index": 0},
+      {"kind": "retreat", "unit_index": 0, "card_no": "1-0-004", "card_level": 1},
+      {"kind": "end_turn"}
+    ]
+  }
+}
+```
+
+## `choice_request`
+
+選択を伴う処理は `choice_request` に統一しています。
+
+現在の用途:
+
+- 対象ユニット選択
+- 手札コストの選択
+- ブロッカー選択
+- インターセプト選択
+
+主な項目:
+
+- `round_no`
+- `turn_serial`
+- `choice_kind`
+- `prompt`
+- `available_choices`
+- `unavailable_choices`
+
+各 choice には UI 向けに次の情報が入ることがあります。
 
 - `choice_label`
 - `choice_summary`
@@ -46,93 +112,29 @@ Each entry in `available_choices` may also include UI-oriented metadata such as:
 - `card_name`
 - `current_bp`
 - `current_damage`
+- `disabled_reason`
+- `disabled_reason_message`
 
-When a candidate exists but is currently unusable, `choice_request` may also include `unavailable_choices`.
-Each unavailable choice can carry a `disabled_reason` such as:
+## Intercept Flow
 
-- `unit_exhausted`
-- `not_enough_cp`
-- `color_requirement_not_met`
-- `attacker_only`
-- `effect_not_implemented`
+- ブロックが成立した戦闘でだけ `choice_request` による intercept 選択が始まります
+- 攻撃側から先に選びます
+- その後は攻撃側と防御側が交互に選びます
+- 双方が連続で `no_intercept` を返したら終了です
+- 使用した intercept は `trigger_zone` から消え、捨札へ移ります
 
-For immediate display use, unavailable choices may also include `disabled_reason_message` in Japanese.
+## Human-Friendly Logs
 
-Intercept choices can be requested multiple times in one battle. The attacker and defender alternate until both pass consecutively. A used intercept leaves `trigger_zone` and moves to the discard pile after effect resolution.
+`demo_match` は生の `messages` に加えて `rendered_messages` も出します。
 
-## Starter Python Bot Flow
+現在の表示形式:
 
-1. Reply to `hello` with bot name and protocol version.
-2. Reply to `deck_submit` with the deck list.
-3. Reply to `mulligan_decision` with `false` by default.
-4. Reply to `request_action` by choosing one legal action.
-5. Reply to `choice_request` by choosing one legal option.
-
-## Example `state_update`
-
-```json
-{
-  "round_no": 1,
-  "turn_player_id": "P1",
-  "turn_serial": 1,
-  "viewer_player_id": "P1",
-  "available_actions": [{"kind": "end_turn"}],
-  "players": {
-    "P1": {
-      "player_id": "P1",
-      "life": 7,
-      "current_cp": 2,
-      "hand_count": 4,
-      "hand_card_nos": ["1-0-001"],
-      "deck_count": 36,
-      "discard_top_to_bottom": [],
-      "battlefield": [],
-      "trigger_zone": []
-    },
-    "P2": {
-      "player_id": "P2",
-      "life": 7,
-      "current_cp": 0,
-      "hand_count": 4,
-      "deck_count": 36,
-      "discard_top_to_bottom": [],
-      "battlefield": [],
-      "trigger_zone": []
-    }
-  },
-  "flags": {
-    "round_one_first_player_cannot_attack": true,
-    "match_ended": false
-  }
-}
+```text
+[R04][E001][P2][REQ] request_action actions=drive,attack,end_turn
+[R04][E002][P2][RES] action end_turn
 ```
 
-For the first player on round 1, the opening draw count follows `opening_draws.first[0]`.
-
-## Example `request_action`
-
-```json
-{
-  "type": "request_action",
-  "request_id": "action-1-P1",
-  "payload": {
-    "available_actions": [
-      {"kind": "set_trigger", "hand_index": 0, "card_no": "1-0-001"},
-      {"kind": "drive", "hand_index": 1, "card_no": "1-0-002", "cost": 0, "trigger_reducer_index": 0},
-      {"kind": "end_turn"}
-    ]
-  }
-}
-```
-
-## Implemented Actions
-
-- `set_trigger`: place a card from hand into the leftmost open trigger slot
-- `drive`: play a unit onto the battlefield
-- `overdrive`: evolve onto a same-color unit already on the battlefield
-- `override`: combine same-name cards in hand to raise level and draw 1
-- `attack`: declare an attack
-- `choice_request` with `choice_kind: "block"`: defender chooses one blocker or `no_block`
-- `choice_request` with `choice_kind: "intercept"`: current player chooses one intercept or `no_intercept`
-
-When a unit or evolution card in `trigger_zone` matches the color of a newly played unit, the leftmost matching card is consumed automatically, reduces cost by 1, and moves to the discard pile.
+- `Rxx`: ROUND 番号
+- `Exxx`: その ROUND 内のイベント通し番号
+- `P?`: 関係プレイヤー
+- `REQ` / `RES` / `EVT`: 要求 / 応答 / 差分イベント

@@ -15,7 +15,7 @@ from tojs.game import (
     list_available_actions,
     start_turn,
 )
-from tojs.models import CardDefinition, Regulation
+from tojs.models import AbilityDefinition, CardDefinition, Regulation
 
 
 class GameStateTest(unittest.TestCase):
@@ -417,6 +417,31 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P1"].hand), 3)
         self.assertEqual(state.players["P1"].current_cp, 1)
         self.assertTrue(state.players["P1"].battlefield[0].attack_restricted)
+
+    # スピードムーブを持つユニットは出たターンでもアタック制限を受けないことを確認する。
+    def test_apply_drive_action_with_speed_move_removes_attack_restriction(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-006"] = CardDefinition(
+            card_no="1-0-006",
+            category="unit",
+            rarity="C",
+            color="red",
+            name="Speed Unit",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(AbilityDefinition(name="スピードムーブ", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].hand = ["1-0-006"]
+        state.players["P1"].current_cp = 1
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertFalse(state.players["P1"].battlefield[0].attack_restricted)
+        self.assertTrue(any(a["kind"] == "attack" for a in list_available_actions(state, "P1")))
 
     # override した Lv.2 ユニットを drive すると場にも Lv.2 で出ることを確認する。
     def test_apply_drive_action_preserves_hand_level(self) -> None:
@@ -972,6 +997,93 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P2"].battlefield), 0)
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
         self.assertEqual(state.players["P2"].discard_pile[0], "2-0-001")
+
+    # 貫通を持つユニットは、ブロックされた戦闘に勝利した時だけ対戦相手のライフにダメージを与えることを確認する。
+    def test_attack_action_with_pierce_deals_life_damage_only_on_battle_win(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-046"] = CardDefinition(
+            card_no="1-0-046",
+            category="unit",
+            rarity="R",
+            color="green",
+            name="Pierce Unit",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(AbilityDefinition(name="貫通", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-046", level=1, exhausted=False, attack_restricted=False)
+        )
+        state.players["P2"].battlefield.append(
+            UnitState(card_no="2-0-001", level=1, exhausted=False, attack_restricted=False)
+        )
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+        )
+
+        self.assertEqual(state.players["P2"].life, 6)
+
+    # 貫通を持っていても、戦闘に勝利しなければライフダメージは与えないことを確認する。
+    def test_attack_action_with_pierce_does_not_deal_life_damage_on_draw(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-046"] = CardDefinition(
+            card_no="1-0-046",
+            category="unit",
+            rarity="R",
+            color="green",
+            name="Pierce Unit",
+            cp=2,
+            bp_by_level=(3, 4, 5),
+            abilities=(AbilityDefinition(name="貫通", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-046", level=1, exhausted=False, attack_restricted=False)
+        )
+        state.players["P2"].battlefield.append(
+            UnitState(card_no="2-0-001", level=1, exhausted=False, attack_restricted=False)
+        )
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+        )
+
+        self.assertEqual(state.players["P2"].life, 7)
+
+    # 不屈を持つユニットはターン終了時に行動権が回復することを確認する。
+    def test_turn_end_recovers_exhausted_unit_with_untiring(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-021"] = CardDefinition(
+            card_no="1-0-021",
+            category="unit",
+            rarity="R",
+            color="yellow",
+            name="Untiring Unit",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(AbilityDefinition(name="不屈", text=""),),
+            race="test",
+        )
+        state.turn_player_id = "P1"
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-021", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        ]
+
+        apply_action(state, "P1", {"kind": "end_turn"}, random.Random(7))
+
+        self.assertFalse(state.players["P1"].battlefield[0].exhausted)
 
     # 攻撃側が戦闘勝利した時はクロックアップし、ダメージが全快することを確認する。
     def test_clock_up_on_attacker_battle_win(self) -> None:

@@ -565,13 +565,14 @@ def apply_drive_action(
     if reducer_index is not None:
         reducer_card_no = player.trigger_zone.pop(reducer_index)
         player.discard_pile.insert(0, reducer_card_no)
+    attack_restricted = not _has_ability_name(state.card_catalog[card_no], "スピードムーブ")
     player.battlefield.append(
         UnitState(
             card_no=card_no,
             unit_id=_allocate_unit_id(state),
             level=card_level,
             exhausted=False,
-            attack_restricted=True,
+            attack_restricted=attack_restricted,
             current_damage=0,
         )
     )
@@ -810,6 +811,8 @@ def resolve_declared_attack_action(
         blocker.current_damage += get_unit_bp(state, attacker)
         attacker_survives = attacker.current_damage < get_unit_bp(state, attacker)
         blocker_survives = blocker.current_damage < get_unit_bp(state, blocker)
+        if _unit_has_ability(state, attacker, "貫通") and attacker_survives and not blocker_survives:
+            defender.life -= 1
         emitted_events: list[AbilityEvent] = []
         if attacker_survives and not blocker_survives:
             emitted_events.extend(_clock_up_unit(player_id, attacker))
@@ -911,41 +914,44 @@ def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[
             unit.unit_id = _allocate_unit_id(state)
         if unit.unit_id != event.source_unit_id:
             continue
-        if supports_ability_event(unit.card_no, event.type):
-            triggered.append(
-                {
-                    "owner_id": event.player_id,
-                    "source_zone": "battlefield",
-                    "source_unit_id": unit.unit_id,
-                    "card_no": unit.card_no,
-                }
+        triggered.extend(
+            _build_triggered_abilities_for_card(
+                state,
+                unit.card_no,
+                event.type,
+                event.player_id,
+                "battlefield",
+                source_unit_id=unit.unit_id,
             )
+        )
 
     if event.type == "unit_entered":
         for index, card_no in enumerate(owner.trigger_zone):
-            if supports_ability_event(card_no, event.type):
-                triggered.append(
-                    {
-                        "owner_id": event.player_id,
-                        "source_zone": "trigger_zone",
-                        "source_index": index,
-                        "card_no": card_no,
-                    }
+            triggered.extend(
+                _build_triggered_abilities_for_card(
+                    state,
+                    card_no,
+                    event.type,
+                    event.player_id,
+                    "trigger_zone",
+                    source_index=index,
                 )
+            )
 
     if event.type == "turn_end":
         for unit in owner.battlefield:
             if unit.unit_id == 0:
                 unit.unit_id = _allocate_unit_id(state)
-            if supports_ability_event(unit.card_no, event.type):
-                triggered.append(
-                    {
-                        "owner_id": event.player_id,
-                        "source_zone": "battlefield",
-                        "source_unit_id": unit.unit_id,
-                        "card_no": unit.card_no,
-                    }
+            triggered.extend(
+                _build_triggered_abilities_for_card(
+                    state,
+                    unit.card_no,
+                    event.type,
+                    event.player_id,
+                    "battlefield",
+                    source_unit_id=unit.unit_id,
                 )
+            )
     return triggered
 
 
@@ -965,10 +971,48 @@ def resolve_triggered_ability(
         triggered_ability["card_no"],
         event.type,
     )
+    keyword_name = triggered_ability.get("keyword_name")
+    if keyword_name == "不屈":
+        return _resolve_untiring(state, event, triggered_ability, rng, choice_resolver)
     resolver = ABILITY_REGISTRY.get(key)
     if resolver is None:
         return []
     return resolver(state, event, triggered_ability, rng, choice_resolver)
+
+
+def _build_triggered_abilities_for_card(
+    state: MatchState,
+    card_no: str,
+    event_type: str,
+    owner_id: PlayerId,
+    source_zone: str,
+    source_unit_id: int | None = None,
+    source_index: int | None = None,
+) -> list[dict[str, Any]]:
+    triggered: list[dict[str, Any]] = []
+    if (card_no, event_type) in ABILITY_REGISTRY:
+        triggered.append(
+            {
+                "owner_id": owner_id,
+                "source_zone": source_zone,
+                "source_unit_id": source_unit_id,
+                "source_index": source_index,
+                "card_no": card_no,
+            }
+        )
+    card = state.card_catalog[card_no]
+    if event_type == "turn_end" and _has_ability_name(card, "不屈"):
+        triggered.append(
+            {
+                "owner_id": owner_id,
+                "source_zone": source_zone,
+                "source_unit_id": source_unit_id,
+                "source_index": source_index,
+                "card_no": card_no,
+                "keyword_name": "不屈",
+            }
+        )
+    return triggered
 
 
 def get_unit_bp(state: MatchState, unit: UnitState) -> int:
@@ -1016,6 +1060,14 @@ def _find_unit_by_id(state: MatchState, player_id: PlayerId, unit_id: int | None
         if unit.unit_id == unit_id:
             return unit
     return None
+
+
+def _has_ability_name(card: CardDefinition, ability_name: str) -> bool:
+    return any(ability.name == ability_name for ability in card.abilities)
+
+
+def _unit_has_ability(state: MatchState, unit: UnitState, ability_name: str) -> bool:
+    return _has_ability_name(state.card_catalog[unit.card_no], ability_name)
 
 
 def _find_first_enemy_unit(state: MatchState, player_id: PlayerId) -> UnitState | None:

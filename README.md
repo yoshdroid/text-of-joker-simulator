@@ -1,20 +1,40 @@
 # text-of-joker-simulator
 
-`A.C.T.I.S.` (Automated Card-battle Test and Interactive Simulation) の初期実装です。
+`A.C.T.I.S.` (Automated Card-battle Test and Interactive Simulation) の試作実装です。
 
-現時点では、次の土台を用意しています。
+メインプログラムが 2 つのプレイヤープログラムを子プロセスとして起動し、`stdio` 上の JSON Lines で対戦を進行します。
 
-- カードプール Excel (`.xlsx`) の読込
-- レギュレーション設定ファイルの読込
-- デッキ構成チェック
-- `stdio` ベースの JSON Lines 通信フォーマット
-- Python 製プレイヤー bot のひな形
-- 初期手札配布、マリガン、ターン開始、`end_turn` までの最小進行
-- `set_trigger` と同属性ユニットのコスト 1 軽減
-- ログ表示向けイベント行フォーマットの提案実装
-- TDD を進めるための `unittest` テスト群
+## 現在できること
 
-## セットアップ
+- カードプール Excel (`text-of-joker.cardpool.xlsx`) の読込
+- レギュレーション JSON の読込
+- デッキ提出とデッキ検証
+- 初期手札配布とマリガン
+- `stdio` ベースの bot 対戦
+- `state_update` / `request_action` / `choice_request` の往復
+- 次の基本アクション
+  - `set_trigger`
+  - `drive`
+  - `overdrive`
+  - `override`
+  - `retreat`
+  - `attack`
+  - `end_turn`
+- ブロック
+- 多段インターセプト
+- トリガー左から順の解決
+- 山札再構築ルール
+- LIFE 0 以下での即終了
+- ROUND 上限到達時の LIFE 比較決着
+- キーワード能力の一部
+  - `スピードムーブ`
+  - `不屈`
+  - `貫通`
+- 人間向けの観戦ログ出力
+  - `rendered_messages`
+  - `[Rxx][Exxx][P?][REQ/RES/EVT] ...`
+
+## 実行
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -25,57 +45,40 @@ python -m tojs.bot --deck configs/decks/example_deck.json
 ```
 
 ```powershell
-python -m tojs.demo_match --cycles 2 --seed 7
+python -m tojs.demo_match --deck1 configs/decks/rg_beatdown.json --deck2 configs/decks/rg_beatdown.json --cycles 10 --seed 7
 ```
 
-`demo_match` の出力 JSON には、生の `messages` に加えて、日本語表示を含む `rendered_messages` も入ります。
+`demo_match` の出力 JSON には次が入ります。
 
-## 主要ファイル
+- `snapshots`: サイクルごとの簡易状態
+- `messages`: 生の通信ログ
+- `rendered_messages`: 日本語寄りの整形ログ
 
-- `configs/regulation.default.json`: レギュレーションのひな形
-- `docs/architecture.md`: 構成とセキュリティ方針
-- `docs/protocol.md`: `stdio` プロトコル案とログ案
-- `src/tojs/cardpool.py`: Excel からカードプールを読む
-- `src/tojs/deck.py`: デッキ検証
-- `src/tojs/regulation.py`: レギュレーション読込
-- `src/tojs/protocol.py`: プレイヤー通信メッセージ
-- `src/tojs/bot.py`: Python bot ひな形
-- `src/tojs/game.py`: ゲーム状態と基本ターン進行
-- `src/tojs/match.py`: bot 2 体を相手にした起動シーケンス
-- `src/tojs/demo_match.py`: bot 同士のローカル実行デモ
-- `src/tojs/cli.py`: メインプログラム入口
-- `configs/decks/example_deck.json`: bot 用サンプルデッキ
+## 主なファイル
 
-## いま未実装の主な部分
+- `configs/regulation.default.json`: 既定レギュレーション
+- `configs/decks/example_deck.json`: 最小サンプルデッキ
+- `configs/decks/rg_beatdown.json`: 進化入りの確認用デッキ
+- `docs/architecture.md`: 構成と責務
+- `docs/protocol.md`: `stdio` 通信仕様
+- `docs/ability-system.md`: 誘発処理の方針
+- `docs/rg_beatdown_support.md`: `rg_beatdown.json` の対応状況
+- `src/tojs/game.py`: ゲーム状態とルール処理
+- `src/tojs/match.py`: 子プロセスとの対戦進行
+- `src/tojs/bot.py`: Python 製サンプル bot
+- `src/tojs/demo_match.py`: ローカル対戦デモ
 
-- 戦闘処理を含む完全なゲームエンジン
-- 全カード能力の解釈と解決
-- Docker 実行ラッパー
+## 現在の未実装・簡略実装
 
-ただし、後から拡張しやすいように、能力は JSON のまま構造化して保持する形にしてあります。
+- カードプール全体の個別効果
+- 消滅ルールの完全実装
+- 対象耐性系キーワード能力
+- Docker 起動ラッパー本体
+- GUI
 
-## 現在の進行範囲
+## 開発方針
 
-- 両プレイヤーの `hello`
-- デッキ提出と検証
-- 初期手札 4 枚配布
-- マリガン確認
-- 先攻 1 ターン目開始
-- `state_update` 配信
-- `set_trigger`
-- 同属性 trigger_zone カードによる `drive` コスト軽減
-- `request_action` に対する `end_turn`
-
-すでに `drive`、`attack`、`block` は最小実装済みです。
-まだ `進化`、`trigger card 固有発火`、`intercept`、`能力解決` は未実装です。
-
-## 挙動確認コマンド
-
-レギュレーションを読み込み、サンプル bot 2 体で最小進行を確認できます。
-
-```powershell
-python -m tojs.demo_match --cycles 2 --seed 7
-```
-
-`boot` 時点では先攻手札 4 枚のまま、後攻へターンが移ると後攻手札が 6 枚になるはずです。
-行動が進むと `battlefield_count` と `trigger_zone_count` の増減で、召喚やセットの動きも追えます。
+- まず JSON Lines の通信を堅くする
+- 盤面ルールを小さく積み上げる
+- 能力はイベント駆動で足す
+- 追加実装ごとに `unittest` を増やす
