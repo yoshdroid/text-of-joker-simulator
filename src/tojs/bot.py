@@ -78,6 +78,15 @@ def choose_action(available_actions: list[dict[str, object]]) -> dict[str, objec
     }
     if not available_actions:
         return {"kind": "end_turn"}
+    retreat_action = next((action for action in available_actions if action.get("kind") == "retreat"), None)
+    drive_action = next((action for action in available_actions if action.get("kind") == "drive"), None)
+    retreat_candidates = [
+        action
+        for action in available_actions
+        if action.get("kind") == "retreat"
+    ]
+    if retreat_action is not None and drive_action is not None and len(retreat_candidates) >= 5:
+        return retreat_action
     return min(
         available_actions,
         key=lambda action: (priorities.get(str(action.get("kind")), 99), available_actions.index(action)),

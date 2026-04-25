@@ -308,6 +308,18 @@ class GameStateTest(unittest.TestCase):
 
         self.assertTrue(any(action["kind"] == "set_trigger" for action in actions))
 
+    # 場にいるユニットは自ターン中に撤退を選べることを確認する。
+    def test_list_available_actions_includes_retreat(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=True)
+        )
+
+        actions = list_available_actions(state, "P1")
+
+        self.assertTrue(any(action["kind"] == "retreat" for action in actions))
+
     # 同名カードが手札に2枚ある時は override アクションが候補に含まれることを確認する。
     def test_list_available_actions_includes_override(self) -> None:
         state = self.create_state()
@@ -342,6 +354,20 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(len(state.players["P1"].hand), 3)
         self.assertEqual(len(state.players["P1"].trigger_zone), 1)
+
+    # 撤退すると場のユニットが捨札へ移り、バトルフィールドから取り除かれることを確認する。
+    def test_apply_retreat_action(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        )
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "retreat")
+
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertEqual(state.players["P1"].battlefield, [])
+        self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
 
     # override では手札内同名カードを重ねて Lv.2 になり、素材が捨札へ送られて1枚ドローすることを確認する。
     def test_apply_override_action(self) -> None:

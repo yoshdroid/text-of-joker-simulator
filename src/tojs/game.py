@@ -155,6 +155,9 @@ def apply_action(
     if player_id != state.turn_player_id:
         raise ValueError(f"not turn player: {player_id}")
     kind = action.get("kind")
+    if kind == "retreat":
+        apply_retreat_action(state, player_id, action)
+        return
     if kind == "set_trigger":
         apply_set_trigger_action(state, player_id, action)
         return
@@ -361,6 +364,16 @@ def list_available_actions(state: MatchState, player_id: PlayerId) -> list[dict[
                     "card_level": card_level,
                 }
             )
+
+    for unit_index, unit in enumerate(player.battlefield):
+        actions.append(
+            {
+                "kind": "retreat",
+                "unit_index": unit_index,
+                "card_no": unit.card_no,
+                "card_level": unit.level,
+            }
+        )
 
     round_one_first_player_cannot_attack = state.round_no == 1 and state.turn_player_id == "P1"
     if not round_one_first_player_cannot_attack:
@@ -640,6 +653,16 @@ def apply_overdrive_action(
             )
         )
     resolve_ability_events(state, emitted_events, rng, choice_resolver)
+
+
+def apply_retreat_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:
+    player = state.players[player_id]
+    unit_index = int(action["unit_index"])
+    if unit_index < 0 or unit_index >= len(player.battlefield):
+        raise ValueError(f"invalid retreat unit index: {unit_index}")
+
+    unit = player.battlefield.pop(unit_index)
+    player.discard_pile.insert(0, unit.card_no)
 
 
 def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:

@@ -135,6 +135,47 @@ class BotTest(unittest.TestCase):
 
         self.assertEqual(chosen["kind"], "overdrive")
 
+    def test_choose_action_uses_retreat_when_field_is_full_and_drive_is_available(self) -> None:
+        chosen = choose_action(
+            [
+                {"kind": "drive", "hand_index": 5, "card_no": "1-0-002"},
+                {"kind": "retreat", "unit_index": 0, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 1, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 2, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 3, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 0, "card_no": "1-0-001"},
+                {"kind": "end_turn"},
+            ]
+        )
+
+        self.assertEqual(chosen["kind"], "retreat")
+
+    def test_choose_action_does_not_use_retreat_when_drive_is_unavailable(self) -> None:
+        chosen = choose_action(
+            [
+                {"kind": "retreat", "unit_index": 0, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 1, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 2, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 3, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 4, "card_no": "1-0-001"},
+                {"kind": "end_turn"},
+            ]
+        )
+
+        self.assertEqual(chosen["kind"], "end_turn")
+
+    def test_choose_action_does_not_use_retreat_when_field_is_not_full(self) -> None:
+        chosen = choose_action(
+            [
+                {"kind": "drive", "hand_index": 2, "card_no": "1-0-002"},
+                {"kind": "retreat", "unit_index": 0, "card_no": "1-0-001"},
+                {"kind": "retreat", "unit_index": 1, "card_no": "1-0-001"},
+                {"kind": "end_turn"},
+            ]
+        )
+
+        self.assertEqual(chosen["kind"], "drive")
+
 
 if __name__ == "__main__":
     unittest.main()

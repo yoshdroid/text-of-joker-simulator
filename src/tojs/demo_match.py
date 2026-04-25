@@ -192,6 +192,8 @@ def _render_action_message(message_type: str, payload: dict[str, Any], card_cata
         return f"{message_type} {card_name}でオーバードライブ"
     if kind == "override" and card_name:
         return f"{message_type} {card_name}をオーバーライド"
+    if kind == "retreat" and card_name:
+        return f"{message_type} {card_name}を撤退させる"
     if kind == "attack":
         return f"{message_type} attack attacker_index={payload.get('attacker_index')}"
     return f"{message_type} {_format_choice(payload)}"
