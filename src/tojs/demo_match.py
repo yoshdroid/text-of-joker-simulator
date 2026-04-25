@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .engine import bootstrap
@@ -48,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
     context = bootstrap(Path(args.cardpool), Path(args.regulation))
     first_player = PlayerProcess(build_python_bot_command(Path(args.deck1)), cwd=".")
@@ -167,10 +170,19 @@ def _render_message_details(message: dict[str, object]) -> str:
         if isinstance(actions, list):
             return f"{message_type} actions=" + ",".join(str(action.get("kind", "?")) for action in actions)
     if message_type == "state_update":
-        return (
-            f"{message_type} round={payload.get('round_no')} turn={payload.get('turn_serial')} "
-            f"viewer={payload.get('viewer_player_id')} active={payload.get('turn_player_id')}"
-        )
+        summary_parts = [
+            f"{message_type} round={payload.get('round_no')} turn={payload.get('turn_serial')}",
+            f"viewer={payload.get('viewer_player_id')} active={payload.get('turn_player_id')}",
+        ]
+        players = payload.get("players", {})
+        if isinstance(players, dict):
+            player_summaries = []
+            for player_id, player_view in players.items():
+                if isinstance(player_view, dict):
+                    player_summaries.append(_render_player_summary(str(player_id), player_view))
+            if player_summaries:
+                summary_parts.append(" || ".join(player_summaries))
+        return " | ".join(summary_parts)
     return message_type
 
 
@@ -186,6 +198,38 @@ def _format_choice(choice: object) -> str:
     if disabled:
         parts.append(f"理由: {disabled}")
     return " / ".join(parts)
+
+
+def _render_player_summary(player_id: str, player_view: dict[str, object]) -> str:
+    life = player_view.get("life", "?")
+    current_cp = player_view.get("current_cp", "?")
+    hand_count = player_view.get("hand_count", "?")
+    deck_count = player_view.get("deck_count", "?")
+    battlefield = player_view.get("battlefield", [])
+    trigger_zone = player_view.get("trigger_zone", [])
+    battlefield_summary = _render_battlefield_summary(battlefield)
+    trigger_count = len(trigger_zone) if isinstance(trigger_zone, list) else 0
+    return (
+        f"{player_id}: life={life} cp={current_cp} hand={hand_count} deck={deck_count} "
+        f"field={battlefield_summary} trigger={trigger_count}"
+    )
+
+
+def _render_battlefield_summary(battlefield: object) -> str:
+    if not isinstance(battlefield, list) or not battlefield:
+        return "-"
+    parts: list[str] = []
+    for unit in battlefield:
+        if not isinstance(unit, dict):
+            continue
+        card_no = unit.get("card_no", "?")
+        level = unit.get("level", "?")
+        current_bp = unit.get("current_bp", "?")
+        status = "行動済み" if unit.get("exhausted") else "行動可"
+        if unit.get("attack_restricted"):
+            status += "/攻撃制限"
+        parts.append(f"{card_no}@L{level}:{current_bp}:{status}")
+    return ",".join(parts) if parts else "-"
 
 
 if __name__ == "__main__":

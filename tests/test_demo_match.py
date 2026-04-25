@@ -29,6 +29,7 @@ class DemoMatchTest(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["direction"], "from_player")
         self.assertTrue(payload["rendered_messages"][0].startswith("[R"))
         self.assertIn("hello", payload["rendered_messages"][0])
+        self.assertTrue(any("state_update" in line and "life=" in line for line in payload["rendered_messages"]))
 
 
 if __name__ == "__main__":
