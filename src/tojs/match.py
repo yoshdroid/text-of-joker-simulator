@@ -121,31 +121,24 @@ def play_single_action_cycle(
     seed: int = 0,
     trace_log: TraceLog | None = None,
 ) -> MatchState:
+    if state.winner is not None:
+        return state
     rng = random.Random(seed)
     players = {"P1": first_player, "P2": second_player}
-    choice_resolver = _build_choice_resolver(players, trace_log)
+    choice_resolver = _build_choice_resolver(players, state, trace_log)
 
-    for viewer_id, process in players.items():
-        payload = build_state_update_payload(state, viewer_id)
-        _request_with_trace(
-            process,
-            viewer_id,
-            Message(
-                type="state_update",
-                request_id=f"state-{state.turn_serial}-{viewer_id}",
-                payload=payload,
-            ),
-            trace_log,
-        )
+    _broadcast_state_update(state, players, trace_log, request_prefix="state")
 
     actor_id = state.turn_player_id
+    if state.winner is not None:
+        return state
     actor = players[actor_id]
     action_response = _request_with_trace(
         actor,
         actor_id,
         Message(
             type="request_action",
-            request_id=f"action-{state.turn_serial}-{actor_id}",
+            request_id=f"action-{state.round_no}-{state.turn_serial}-{actor_id}",
             payload={"available_actions": list_available_actions(state, actor_id)},
         ),
         trace_log,
@@ -154,19 +147,11 @@ def play_single_action_cycle(
         defender_id = "P2" if actor_id == "P1" else "P1"
         defender = players[defender_id]
         declare_attack_action(state, actor_id, action_response.payload, rng, choice_resolver)
+        if state.winner is not None:
+            _broadcast_state_update(state, players, trace_log, request_prefix="final-state")
+            return state
 
-        for viewer_id, process in players.items():
-            payload = build_state_update_payload(state, viewer_id)
-            _request_with_trace(
-                process,
-                viewer_id,
-                Message(
-                    type="state_update",
-                    request_id=f"attack-state-{state.turn_serial}-{viewer_id}",
-                    payload=payload,
-                ),
-                trace_log,
-            )
+        _broadcast_state_update(state, players, trace_log, request_prefix="attack-state")
 
         block_actions = list_available_block_actions(state, defender_id)
         block_payload = {"kind": "no_block"}
@@ -193,6 +178,8 @@ def play_single_action_cycle(
         resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng, choice_resolver)
     else:
         apply_action(state, actor_id, action_response.payload, rng, choice_resolver)
+    if state.winner is not None:
+        _broadcast_state_update(state, players, trace_log, request_prefix="final-state")
     return state
 
 
@@ -239,15 +226,20 @@ def _request_with_trace(
 
 def _build_choice_resolver(
     players: dict[str, PlayerProcess],
+    state: MatchState,
     trace_log: TraceLog | None,
 ):
+    request_serial = 0
+
     def resolve_choice(player_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal request_serial
+        request_serial += 1
         response = _request_with_trace(
             players[player_id],
             player_id,
             Message(
                 type="choice_request",
-                request_id=f"choice-{player_id}",
+                request_id=f"choice-{state.round_no}-{state.turn_serial}-{request_serial}-{player_id}",
                 payload=payload,
             ),
             trace_log,
@@ -255,6 +247,26 @@ def _build_choice_resolver(
         return response.payload
 
     return resolve_choice
+
+
+def _broadcast_state_update(
+    state: MatchState,
+    players: dict[str, PlayerProcess],
+    trace_log: TraceLog | None,
+    request_prefix: str,
+) -> None:
+    for viewer_id, process in players.items():
+        payload = build_state_update_payload(state, viewer_id)
+        _request_with_trace(
+            process,
+            viewer_id,
+            Message(
+                type="state_update",
+                request_id=f"{request_prefix}-{state.round_no}-{state.turn_serial}-{viewer_id}",
+                payload=payload,
+            ),
+            trace_log,
+        )
 
 
 def _request_battle_intercepts(
@@ -266,7 +278,7 @@ def _request_battle_intercepts(
     blocker: Any,
     trace_log: TraceLog | None,
 ) -> None:
-    choice_resolver = _build_choice_resolver(players, trace_log)
+    choice_resolver = _build_choice_resolver(players, state, trace_log)
     battle_order = [
         (attacker_id, True),
         (defender_id, False),

@@ -26,8 +26,10 @@ def decode_message(line: str) -> Message:
     )
 
 
-def render_event_log(round_no: int, actor: str, kind: str, details: str) -> str:
-    return f"[R{round_no:02d}][{actor}][{kind}] {details}"
+def render_event_log(round_no: int, actor: str, kind: str, details: str, event_no: int | None = None) -> str:
+    if event_no is None:
+        return f"[R{round_no:02d}][{actor}][{kind}] {details}"
+    return f"[R{round_no:02d}][E{event_no:03d}][{actor}][{kind}] {details}"
 
 
 def write_message(stream: IO[str], message: Message) -> None:
@@ -40,4 +42,3 @@ def read_message(stream: IO[str]) -> Message | None:
     if line == "":
         return None
     return decode_message(line.strip())
-

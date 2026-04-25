@@ -71,6 +71,50 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertEqual(len(state.players["P1"].battlefield), 1)
         self.assertEqual(state.players["P1"].current_cp, 1)
 
+    # 勝敗確定後は追加の action cycle を進めず、そのまま状態を返すことを確認する。
+    def test_play_single_action_cycle_stops_after_winner_is_decided(self) -> None:
+        result = run_boot_sequence(self.context, self.first_player, self.second_player, seed=7)
+        result.match_state.winner = "P1"
+        result.match_state.ended_reason = "life_zero"
+        turn_serial = result.match_state.turn_serial
+
+        state = play_single_action_cycle(result.match_state, self.first_player, self.second_player, seed=7)
+
+        self.assertEqual(state.winner, "P1")
+        self.assertEqual(state.turn_serial, turn_serial)
+
+    # LIFE 0 で勝敗が決まったターンでも、最終 state_update が送られてログ化できることを確認する。
+    def test_play_single_action_cycle_sends_final_state_update_when_match_ends(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-001"] * 40,
+            ["1-0-001"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P2"].life = 1
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
+            }
+        )
+        second_player = FakePlayerProcess({})
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        p2_state_updates = [message for message in second_player.received_messages if message.type == "state_update"]
+        self.assertGreaterEqual(len(p2_state_updates), 2)
+        self.assertEqual(p2_state_updates[-1].payload["players"]["P2"]["life"], 0)
+        self.assertTrue(p2_state_updates[-1].payload["flags"]["match_ended"])
+
     # アタック時能力でブロッカー候補が消えた場合は block_request を出さずにノーブロックとして解決することを確認する
     def test_attack_trigger_resolves_before_block_request(self) -> None:
         card_catalog = {card.card_no: card for card in self.context.cardpool}
@@ -157,6 +201,9 @@ class MatchRunnerTest(unittest.TestCase):
         play_single_action_cycle(state, first_player, second_player, seed=7)
 
         self.assertTrue(any(message.type == "choice_request" for message in first_player.received_messages))
+        choice_request = next(message for message in first_player.received_messages if message.type == "choice_request")
+        self.assertEqual(choice_request.payload["round_no"], 2)
+        self.assertEqual(choice_request.payload["turn_serial"], 2)
         self.assertEqual(state.players["P2"].battlefield[1].current_damage, 1000)
         self.assertEqual(state.players["P2"].battlefield[0].current_damage, 0)
 

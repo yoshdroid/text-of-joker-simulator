@@ -98,6 +98,7 @@ def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str
     rendered: list[str] = []
     latest_round_no = 0
     previous_private_states: dict[str, dict[str, Any]] = {}
+    request_rounds: dict[str, int] = {}
 
     for entry in trace_log:
         message = entry.get("message", {})
@@ -107,7 +108,13 @@ def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str
         if isinstance(payload, dict) and "round_no" in payload:
             latest_round_no = int(payload.get("round_no", latest_round_no))
         request_id = str(message.get("request_id", ""))
-        round_no = _extract_round_no_from_request_id(request_id) or latest_round_no
+        if entry.get("direction") == "to_player" and request_id:
+            request_rounds[request_id] = _extract_round_no_from_request_id(request_id) or latest_round_no
+        round_no = (
+            request_rounds.get(request_id)
+            or _extract_round_no_from_request_id(request_id)
+            or latest_round_no
+        )
         actor = str(entry.get("player_id", "SYS"))
         direction = "REQ" if entry.get("direction") == "to_player" else "RES"
         details = _render_message_details(message, card_catalog)
@@ -122,7 +129,7 @@ def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str
             previous_state = previous_private_states.get(actor)
             rendered.extend(_render_state_diff_events(round_no, actor, previous_state, payload, card_catalog))
             previous_private_states[actor] = payload
-    return rendered
+    return _attach_round_event_numbers(rendered)
 
 
 def _extract_round_no_from_request_id(request_id: str) -> int | None:
@@ -360,6 +367,33 @@ def _lookup_card_name(card_no: object, card_catalog: dict[str, Any]) -> str | No
         return None
     card = card_catalog.get(card_no)
     return getattr(card, "name", None)
+
+
+def _attach_round_event_numbers(rendered: list[str]) -> list[str]:
+    numbered: list[str] = []
+    round_event_numbers: dict[int, int] = {}
+    for line in rendered:
+        round_no = _extract_round_no_from_rendered_line(line)
+        if round_no is None:
+            numbered.append(line)
+            continue
+        event_no = round_event_numbers.get(round_no, 0) + 1
+        round_event_numbers[round_no] = event_no
+        prefix = f"[R{round_no:02d}]"
+        numbered.append(line.replace(prefix, f"{prefix}[E{event_no:03d}]", 1))
+    return numbered
+
+
+def _extract_round_no_from_rendered_line(line: str) -> int | None:
+    if not line.startswith("[R"):
+        return None
+    end = line.find("]")
+    if end < 0:
+        return None
+    round_text = line[2:end]
+    if not round_text.isdigit():
+        return None
+    return int(round_text)
 
 
 if __name__ == "__main__":

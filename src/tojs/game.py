@@ -128,10 +128,7 @@ def end_turn(state: MatchState, rng: random.Random) -> None:
             unit.temporary_bp_modifier = 0
 
     next_player_id = "P2" if state.turn_player_id == "P1" else "P1"
-    if state.turn_player_id == "P2":
-        state.round_no += 1
-
-    if state.round_no > state.regulation.round_count:
+    if state.turn_player_id == "P2" and state.round_no >= state.regulation.round_count:
         first_life = state.players["P1"].life
         second_life = state.players["P2"].life
         if first_life > second_life:
@@ -142,6 +139,9 @@ def end_turn(state: MatchState, rng: random.Random) -> None:
             state.winner = "draw"
         state.ended_reason = "round_limit"
         return
+
+    if state.turn_player_id == "P2":
+        state.round_no += 1
 
     start_turn(state, next_player_id, rng)
 
@@ -432,6 +432,8 @@ def build_block_choice_payload(state: MatchState, player_id: PlayerId) -> dict[s
             }
         )
     return {
+        "round_no": state.round_no,
+        "turn_serial": state.turn_serial,
         "choice_kind": "block",
         "prompt": "Choose a blocker or no block.",
         "available_choices": actions,
@@ -512,6 +514,8 @@ def build_intercept_choice_payload(
             }
         )
     return {
+        "round_no": state.round_no,
+        "turn_serial": state.turn_serial,
         "choice_kind": "intercept",
         "prompt": "Choose an intercept or pass.",
         "available_choices": actions,
@@ -1048,6 +1052,8 @@ def _choose_enemy_unit(
     selected = _request_choice(
         player_id,
         {
+            "round_no": state.round_no,
+            "turn_serial": state.turn_serial,
             "choice_kind": "target_unit",
             "prompt": prompt,
             "source_card_no": source_card_no,
@@ -1095,6 +1101,8 @@ def _choose_hand_card_to_discard(
     selected = _request_choice(
         player_id,
         {
+            "round_no": state.round_no,
+            "turn_serial": state.turn_serial,
             "choice_kind": "discard_hand",
             "prompt": prompt,
             "source_card_no": source_card_no,
@@ -1218,7 +1226,7 @@ def _get_intercept_disabled_reason(
         return "not_intercept_card"
     if (card.cp or 0) > player.current_cp:
         return "not_enough_cp"
-    if card.color != "無" and not any(
+    if not _is_colorless(card.color) and not any(
         state.card_catalog[unit.card_no].color == card.color for unit in player.battlefield
     ):
         return "color_requirement_not_met"
@@ -1227,6 +1235,11 @@ def _get_intercept_disabled_reason(
     if card_no not in {"1-0-065", "1-0-074", "1-0-081", "1-0-096"}:
         return "effect_not_implemented"
     return None
+
+
+def _is_colorless(color: str) -> bool:
+    normalized = color.strip().lower()
+    return normalized in {"colorless", "none"} or any(ord(ch) == 28961 for ch in color)
 
 
 def _get_disabled_reason_message(disabled_reason: str) -> str:

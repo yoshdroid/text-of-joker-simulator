@@ -653,6 +653,20 @@ class GameStateTest(unittest.TestCase):
         yes_actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
         self.assertTrue(any(action["kind"] == "use_intercept" for action in yes_actions))
 
+    # 無色 intercept は同色ユニットが場にいなくても使用可能であることを確認する。
+    def test_list_available_intercept_actions_allows_colorless_without_field_unit(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = []
+        state.players["P1"].current_cp = 1
+        state.players["P1"].trigger_zone = ["1-0-065"]
+
+        actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
+
+        self.assertTrue(any(action["kind"] == "use_intercept" for action in actions))
+
     # blocker 選択肢には UI 表示に使える名前と BP 情報が含まれることを確認する。
     def test_list_available_block_actions_includes_choice_metadata(self) -> None:
         state = self.create_state()
@@ -760,6 +774,8 @@ class GameStateTest(unittest.TestCase):
         )
 
         self.assertEqual(captured_payloads[0]["choice_kind"], "target_unit")
+        self.assertEqual(captured_payloads[0]["round_no"], 2)
+        self.assertEqual(captured_payloads[0]["turn_serial"], 1)
         first_choice = captured_payloads[0]["available_choices"][0]
         self.assertEqual(first_choice["card_name"], "Blue Unit 1")
         self.assertIn("choice_label", first_choice)
@@ -789,6 +805,8 @@ class GameStateTest(unittest.TestCase):
         )
 
         self.assertEqual(captured_payloads[0]["choice_kind"], "discard_hand")
+        self.assertEqual(captured_payloads[0]["round_no"], 2)
+        self.assertEqual(captured_payloads[0]["turn_serial"], 1)
         first_choice = captured_payloads[0]["available_choices"][0]
         self.assertEqual(first_choice["card_name"], "Red Unit 2")
         self.assertIn("choice_label", first_choice)
@@ -874,6 +892,36 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(state.players["P2"].life, 6)
         self.assertTrue(state.players["P1"].battlefield[0].exhausted)
+
+    # ライフが 0 以下になった時は、その場で勝敗が確定することを確認する。
+    def test_apply_attack_action_ends_match_when_life_reaches_zero(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P2"].life = 1
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-001", level=1, exhausted=False, attack_restricted=False)
+        )
+
+        apply_attack_action(state, "P1", {"kind": "attack", "attacker_index": 0, "target": "player"})
+
+        self.assertEqual(state.players["P2"].life, 0)
+        self.assertEqual(state.winner, "P1")
+        self.assertEqual(state.ended_reason, "life_zero")
+
+    def test_end_turn_decides_winner_by_life_at_round_limit(self) -> None:
+        state = self.create_state()
+        state.round_no = state.regulation.round_count
+        state.turn_player_id = "P2"
+        state.turn_serial = 20
+        state.players["P1"].life = 5
+        state.players["P2"].life = 3
+
+        apply_action(state, "P2", {"kind": "end_turn"}, random.Random(7))
+
+        self.assertEqual(state.round_no, state.regulation.round_count)
+        self.assertEqual(state.winner, "P1")
+        self.assertEqual(state.ended_reason, "round_limit")
 
     # 1 体ブロックされたアタックでは両者の BP 比較で破壊判定が行われることを確認する。
     def test_apply_attack_action_with_single_block(self) -> None:

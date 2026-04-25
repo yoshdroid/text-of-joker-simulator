@@ -3,6 +3,8 @@ import subprocess
 import sys
 import unittest
 
+from tojs.demo_match import _render_trace_log
+
 
 class DemoMatchTest(unittest.TestCase):
     # デモマッチ実行で bot 同士の起動結果とターン進行スナップショットを出力できることを確認する。
@@ -28,10 +30,67 @@ class DemoMatchTest(unittest.TestCase):
         self.assertEqual(payload["messages"][0]["direction"], "to_player")
         self.assertEqual(payload["messages"][1]["direction"], "from_player")
         self.assertTrue(payload["rendered_messages"][0].startswith("[R"))
+        self.assertIn("[E", payload["rendered_messages"][0])
         self.assertIn("hello", payload["rendered_messages"][0])
         self.assertTrue(any("state_update" in line and "life=" in line for line in payload["rendered_messages"]))
         self.assertTrue(any("ユニットドライブ" in line for line in payload["rendered_messages"]))
         self.assertTrue(any("トリガーゾーンに" in line and "セット" in line for line in payload["rendered_messages"]))
+
+    def test_render_trace_log_uses_request_round_for_choice_response(self) -> None:
+        rendered = _render_trace_log(
+            [
+                {
+                    "direction": "to_player",
+                    "player_id": "P1",
+                    "message": {
+                        "type": "choice_request",
+                        "request_id": "choice-9-17-1-P1",
+                        "payload": {"round_no": 9, "turn_serial": 17, "choice_kind": "block", "available_choices": []},
+                    },
+                },
+                {
+                    "direction": "from_player",
+                    "player_id": "P1",
+                    "message": {
+                        "type": "choice_response",
+                        "request_id": "choice-9-17-1-P1",
+                        "payload": {"kind": "no_block"},
+                    },
+                },
+            ],
+            {},
+        )
+
+        self.assertTrue(rendered[0].startswith("[R09][E001][P1][REQ]"))
+        self.assertTrue(rendered[1].startswith("[R09][E002][P1][RES]"))
+
+    def test_render_trace_log_uses_request_round_for_request_action(self) -> None:
+        rendered = _render_trace_log(
+            [
+                {
+                    "direction": "to_player",
+                    "player_id": "P2",
+                    "message": {
+                        "type": "request_action",
+                        "request_id": "action-4-8-P2",
+                        "payload": {"available_actions": [{"kind": "end_turn"}]},
+                    },
+                },
+                {
+                    "direction": "from_player",
+                    "player_id": "P2",
+                    "message": {
+                        "type": "action",
+                        "request_id": "action-4-8-P2",
+                        "payload": {"kind": "end_turn"},
+                    },
+                },
+            ],
+            {},
+        )
+
+        self.assertTrue(rendered[0].startswith("[R04][E001][P2][REQ]"))
+        self.assertTrue(rendered[1].startswith("[R04][E002][P2][RES]"))
 
 
 if __name__ == "__main__":
