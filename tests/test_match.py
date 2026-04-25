@@ -28,6 +28,7 @@ class FakePlayerProcess:
             "mulligan_decision": "mulligan_decision",
             "request_action": "action",
             "block_request": "block_action",
+            "intercept_request": "intercept_action",
         }[message.type]
         return Message(type=response_type, request_id=message.request_id, payload=payload)
 
@@ -111,6 +112,102 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertFalse(any(message.type == "block_request" for message in second_player.received_messages))
         self.assertEqual(len(state.players["P2"].battlefield), 0)
         self.assertEqual(state.players["P2"].life, 6)
+
+    # ブロック成立後は戦闘前に intercept_request が送られ、使用した intercept の効果が戦闘結果に反映されることを確認する
+    def test_battle_intercept_is_requested_before_combat_damage(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-001"] * 40,
+            ["1-0-001"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].trigger_zone = ["1-0-074"]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
+                "intercept_request": [{"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"}],
+            }
+        )
+        second_player = FakePlayerProcess(
+            {
+                "block_request": [{"kind": "block", "blocker_index": 0}],
+            }
+        )
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        self.assertTrue(any(message.type == "intercept_request" for message in first_player.received_messages))
+        self.assertEqual(len(state.players["P1"].battlefield), 1)
+        self.assertEqual(len(state.players["P2"].battlefield), 0)
+
+    # intercept は攻撃側と防御側で交互に、双方がパスするまで多段で使用確認されることを確認する
+    def test_battle_intercept_allows_multiple_rounds(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-001"] * 40,
+            ["1-0-001"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].current_cp = 1
+        state.players["P2"].current_cp = 1
+        state.players["P1"].trigger_zone = ["1-0-074", "1-0-081"]
+        state.players["P2"].trigger_zone = ["1-0-065"]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
+                "intercept_request": [
+                    {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"},
+                    {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-081"},
+                ],
+            }
+        )
+        second_player = FakePlayerProcess(
+            {
+                "block_request": [{"kind": "block", "blocker_index": 0}],
+                "intercept_request": [
+                    {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-065"},
+                ],
+            }
+        )
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        self.assertEqual(
+            len([message for message in first_player.received_messages if message.type == "intercept_request"]),
+            2,
+        )
+        self.assertEqual(
+            len([message for message in second_player.received_messages if message.type == "intercept_request"]),
+            1,
+        )
+        self.assertEqual(len(state.players["P1"].battlefield), 1)
+        self.assertEqual(len(state.players["P2"].battlefield), 0)
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertEqual(state.players["P2"].trigger_zone, [])
 
 
 if __name__ == "__main__":

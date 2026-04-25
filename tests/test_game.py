@@ -5,8 +5,10 @@ from tojs.game import (
     UnitState,
     apply_action,
     apply_attack_action,
+    apply_intercept_action,
     build_state_update_payload,
     create_match_state,
+    list_available_intercept_actions,
     list_available_actions,
     start_turn,
 )
@@ -136,6 +138,50 @@ class GameStateTest(unittest.TestCase):
                     color="yellow",
                     name="Draw Trigger",
                     cp=None,
+                    bp_by_level=(),
+                    abilities=(),
+                    race="test",
+                ),
+                "1-0-065": CardDefinition(
+                    card_no="1-0-065",
+                    category="intercept",
+                    rarity="R",
+                    color="無",
+                    name="Power Shortage",
+                    cp=1,
+                    bp_by_level=(),
+                    abilities=(),
+                    race="test",
+                ),
+                "1-0-074": CardDefinition(
+                    card_no="1-0-074",
+                    category="intercept",
+                    rarity="R",
+                    color="無",
+                    name="Hero Sword",
+                    cp=0,
+                    bp_by_level=(),
+                    abilities=(),
+                    race="test",
+                ),
+                "1-0-081": CardDefinition(
+                    card_no="1-0-081",
+                    category="intercept",
+                    rarity="R",
+                    color="red",
+                    name="Awakening of Evil",
+                    cp=0,
+                    bp_by_level=(),
+                    abilities=(),
+                    race="test",
+                ),
+                "1-0-096": CardDefinition(
+                    card_no="1-0-096",
+                    category="intercept",
+                    rarity="R",
+                    color="green",
+                    name="Fortress Wall",
+                    cp=0,
                     bp_by_level=(),
                     abilities=(),
                     race="test",
@@ -366,6 +412,47 @@ class GameStateTest(unittest.TestCase):
         apply_action(state, "P1", action, random.Random(7))
 
         self.assertEqual(state.players["P1"].hand, ["1-0-003"])
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertEqual(state.players["P1"].discard_pile[0], "1-0-062")
+
+    # 効果が全く及ばない trigger は発動せず、trigger_zone に残ることを確認する
+    def test_trigger_zone_ability_stays_when_no_effect(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].hand = ["1-0-001"]
+        state.players["P1"].trigger_zone = ["1-0-062"]
+        state.players["P1"].draw_pile = []
+        state.players["P1"].current_cp = 1
+
+        action = {
+            "kind": "drive",
+            "hand_index": 0,
+            "card_no": "1-0-001",
+            "card_level": 1,
+            "cost": 1,
+            "trigger_reducer_index": None,
+        }
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertEqual(state.players["P1"].trigger_zone, ["1-0-062"])
+        self.assertEqual(state.players["P1"].discard_pile, [])
+
+    # 左から順に trigger が解決され、使用済みカードが順に捨札へ送られることを確認する
+    def test_multiple_trigger_zone_abilities_resolve_from_left_to_right(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].hand = ["1-0-001"]
+        state.players["P1"].trigger_zone = ["1-0-062", "1-0-061"]
+        state.players["P1"].draw_pile = ["1-0-003", "1-0-074"] + state.players["P1"].draw_pile
+        state.players["P1"].current_cp = 1
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertEqual(state.players["P1"].discard_pile[:2], ["1-0-061", "1-0-062"])
+        self.assertIn("1-0-003", state.players["P1"].hand)
+        self.assertIn("1-0-074", state.players["P1"].hand)
 
     # ソードファイターのアタック時能力で BP が +2000 され、ターン終了時に元へ戻ることを確認する。
     def test_attack_trigger_temporary_bp_bonus(self) -> None:
@@ -448,6 +535,41 @@ class GameStateTest(unittest.TestCase):
         )
 
         self.assertEqual(state.players["P2"].life, 6)
+
+    # 無色 intercept は戦闘時に使用可能で、使用すると trigger_zone から捨札へ移り BP 補正が反映されることを確認する
+    def test_apply_intercept_action_for_battle_buff(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [attacker]
+        state.players["P2"].battlefield = [blocker]
+        state.players["P1"].trigger_zone = ["1-0-074"]
+
+        actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
+        action = next(action for action in actions if action["kind"] == "use_intercept")
+
+        apply_intercept_action(state, "P1", action, attacker, blocker, True)
+
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertEqual(state.players["P1"].discard_pile[0], "1-0-074")
+        self.assertEqual(build_state_update_payload(state, "P1")["players"]["P1"]["battlefield"][0]["current_bp"], 5000)
+
+    # 色指定 intercept は同色ユニットがいないと使用できず、赤ユニットがいれば使用可能になることを確認する
+    def test_list_available_intercept_actions_respects_color_requirement(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = []
+        state.players["P1"].trigger_zone = ["1-0-081"]
+
+        no_actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
+        self.assertFalse(any(action["kind"] == "use_intercept" for action in no_actions))
+
+        state.players["P1"].battlefield = [attacker]
+        yes_actions = list_available_intercept_actions(state, "P1", attacker, blocker, True)
+        self.assertTrue(any(action["kind"] == "use_intercept" for action in yes_actions))
 
     # overdrive では対象ユニットを evolution に置き換え、元ユニットを捨札へ送ることを確認する。
     def test_apply_overdrive_action(self) -> None:

@@ -61,6 +61,18 @@ class SimpleBot:
                 request_id=message.request_id,
                 payload=chosen_action,
             )
+        if message.type == "intercept_request":
+            available_actions = message.payload.get("available_actions", [])
+            chosen_action = {"kind": "no_intercept"}
+            for action in available_actions:
+                if action.get("kind") == "use_intercept":
+                    chosen_action = action
+                    break
+            return Message(
+                type="intercept_action",
+                request_id=message.request_id,
+                payload=chosen_action,
+            )
         return Message(
             type="error",
             request_id=message.request_id,
@@ -75,10 +87,11 @@ def load_deck(path: str | Path) -> list[str]:
 def choose_action(available_actions: list[dict[str, object]]) -> dict[str, object]:
     priorities = {
         "overdrive": 0,
-        "drive": 1,
-        "attack": 2,
-        "set_trigger": 3,
-        "end_turn": 4,
+        "override": 1,
+        "drive": 2,
+        "attack": 3,
+        "set_trigger": 4,
+        "end_turn": 5,
     }
     if not available_actions:
         return {"kind": "end_turn"}

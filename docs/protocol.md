@@ -41,9 +41,13 @@
 - `state_update`
 - `request_action`
 - `block_request`
+- `intercept_request`
 - `action`
 - `result`
 - `error`
+
+`intercept_request` は戦闘中に複数回届く場合があります。
+攻撃側と防御側が交互に、双方が続けて使用しないと返すまで繰り返されます。
 
 ## Python bot ひな形の基本フロー
 

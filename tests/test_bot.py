@@ -53,6 +53,26 @@ class BotTest(unittest.TestCase):
         self.assertEqual(response.type, "block_action")
         self.assertEqual(response.payload["kind"], "block")
 
+    # intercept_request では使用可能な intercept があれば最初の 1 枚を選ぶことを確認する
+    def test_handle_intercept_request(self) -> None:
+        bot = SimpleBot(deck_card_nos=["1-0-001"] * 40)
+
+        response = bot.handle(
+            Message(
+                type="intercept_request",
+                request_id="intercept-1",
+                payload={
+                    "available_actions": [
+                        {"kind": "no_intercept"},
+                        {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"},
+                    ]
+                },
+            )
+        )
+
+        self.assertEqual(response.type, "intercept_action")
+        self.assertEqual(response.payload["kind"], "use_intercept")
+
     # bot は overdrive を最優先し、次に override と drive を選ぶことを確認する。
     def test_choose_action_prefers_overdrive(self) -> None:
         chosen = choose_action(

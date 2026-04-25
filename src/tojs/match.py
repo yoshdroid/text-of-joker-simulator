@@ -6,14 +6,17 @@ from typing import Any
 
 from .engine import BootstrapContext, validate_submitted_deck
 from .game import (
+    apply_intercept_action,
     MatchState,
     apply_action,
     apply_mulligan,
     build_state_update_payload,
     create_match_state,
     declare_attack_action,
+    get_unit_bp,
     list_available_actions,
     list_available_block_actions,
+    list_available_intercept_actions,
     resolve_declared_attack_action,
     start_turn,
 )
@@ -177,6 +180,19 @@ def play_single_action_cycle(
             )
             block_payload = block_response.payload
 
+        if block_payload.get("kind") == "block":
+            attacker = state.players[actor_id].battlefield[action_response.payload["attacker_index"]]
+            blocker = state.players[defender_id].battlefield[block_payload["blocker_index"]]
+            _request_battle_intercepts(
+                state,
+                players,
+                actor_id,
+                defender_id,
+                attacker,
+                blocker,
+                trace_log,
+            )
+
         resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng)
     else:
         apply_action(state, actor_id, action_response.payload, rng)
@@ -222,3 +238,85 @@ def _request_with_trace(
             }
         )
     return response
+
+
+def _request_battle_intercepts(
+    state: MatchState,
+    players: dict[str, PlayerProcess],
+    attacker_id: str,
+    defender_id: str,
+    attacker: Any,
+    blocker: Any,
+    trace_log: TraceLog | None,
+) -> None:
+    battle_order = [
+        (attacker_id, True),
+        (defender_id, False),
+    ]
+    pass_count = 0
+    request_serial = 0
+    order_index = 0
+    while pass_count < 2:
+        player_id, own_unit_is_attacker = battle_order[order_index % 2]
+        own_unit = attacker if own_unit_is_attacker else blocker
+        enemy_unit = blocker if own_unit_is_attacker else attacker
+        available_actions = list_available_intercept_actions(
+            state,
+            player_id,
+            own_unit,
+            enemy_unit,
+            own_unit_is_attacker,
+        )
+        if not any(action.get("kind") == "use_intercept" for action in available_actions):
+            pass_count += 1
+            order_index += 1
+            continue
+        request_serial += 1
+        response = _request_with_trace(
+            players[player_id],
+            player_id,
+            Message(
+                type="intercept_request",
+                request_id=f"intercept-{state.turn_serial}-{player_id}-{request_serial}",
+                payload={
+                    "available_actions": available_actions,
+                    "battle": _build_intercept_battle_payload(state, own_unit, enemy_unit, own_unit_is_attacker),
+                },
+            ),
+            trace_log,
+        )
+        apply_intercept_action(
+            state,
+            player_id,
+            response.payload,
+            own_unit,
+            enemy_unit,
+            own_unit_is_attacker,
+        )
+        if response.payload.get("kind") == "use_intercept":
+            pass_count = 0
+        else:
+            pass_count += 1
+        order_index += 1
+
+
+def _build_intercept_battle_payload(
+    state: MatchState,
+    own_unit: Any,
+    enemy_unit: Any,
+    own_unit_is_attacker: bool,
+) -> dict[str, Any]:
+    return {
+        "own_unit": {
+            "card_no": own_unit.card_no,
+            "level": own_unit.level,
+            "current_bp": get_unit_bp(state, own_unit),
+            "is_attacker": own_unit_is_attacker,
+        },
+        "opposing_unit": {
+            "card_no": enemy_unit.card_no,
+            "level": enemy_unit.level,
+            "current_bp": get_unit_bp(state, enemy_unit),
+            "is_attacker": not own_unit_is_attacker,
+        },
+    }

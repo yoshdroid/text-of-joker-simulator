@@ -381,6 +381,33 @@ def list_available_block_actions(state: MatchState, player_id: PlayerId) -> list
     return actions
 
 
+def list_available_intercept_actions(
+    state: MatchState,
+    player_id: PlayerId,
+    own_unit: UnitState,
+    enemy_unit: UnitState,
+    own_unit_is_attacker: bool,
+) -> list[dict[str, Any]]:
+    player = state.players[player_id]
+    actions = [{"kind": "no_intercept"}]
+    for trigger_index, card_no in enumerate(player.trigger_zone):
+        card = state.card_catalog[card_no]
+        if card.category != "intercept":
+            continue
+        if not _can_use_intercept_card(state, player_id, card_no, own_unit_is_attacker):
+            continue
+        actions.append(
+            {
+                "kind": "use_intercept",
+                "trigger_index": trigger_index,
+                "card_no": card_no,
+                "cost": card.cp or 0,
+                "target": _get_intercept_target(card_no, own_unit_is_attacker),
+            }
+        )
+    return actions
+
+
 def apply_drive_action(state: MatchState, player_id: PlayerId, action: dict[str, Any], rng: random.Random) -> None:
     player = state.players[player_id]
     hand_index = action["hand_index"]
@@ -655,6 +682,32 @@ def resolve_declared_attack_action(
     _update_winner_by_life(state)
 
 
+def apply_intercept_action(
+    state: MatchState,
+    player_id: PlayerId,
+    action: dict[str, Any],
+    own_unit: UnitState,
+    enemy_unit: UnitState,
+    own_unit_is_attacker: bool,
+) -> None:
+    if action.get("kind") != "use_intercept":
+        return
+    player = state.players[player_id]
+    trigger_index = int(action["trigger_index"])
+    if trigger_index < 0 or trigger_index >= len(player.trigger_zone):
+        raise ValueError(f"invalid trigger index: {trigger_index}")
+
+    card_no = player.trigger_zone[trigger_index]
+    if not _can_use_intercept_card(state, player_id, card_no, own_unit_is_attacker):
+        raise ValueError(f"intercept cannot be used: {card_no}")
+
+    card = state.card_catalog[card_no]
+    player.current_cp -= card.cp or 0
+    used_card_no = player.trigger_zone.pop(trigger_index)
+    player.discard_pile.insert(0, used_card_no)
+    _resolve_intercept_effect(card_no, own_unit, enemy_unit, own_unit_is_attacker)
+
+
 def get_drive_cost(state: MatchState, player_id: PlayerId, card_no: str) -> tuple[int, int | None]:
     player = state.players[player_id]
     card = state.card_catalog[card_no]
@@ -824,10 +877,10 @@ def _draw_cards_by_category(
     player_id: PlayerId,
     category: str,
     count: int,
-) -> None:
+) -> int:
     player = state.players[player_id]
     if count <= 0 or len(player.hand) >= state.regulation.hand_size_limit:
-        return
+        return 0
     matches: list[str] = []
     remaining: list[str] = []
     for card_no in player.draw_pile:
@@ -836,7 +889,41 @@ def _draw_cards_by_category(
         else:
             remaining.append(card_no)
     player.draw_pile = remaining
-    player.hand.extend(matches[: max(0, state.regulation.hand_size_limit - len(player.hand))])
+    actual_matches = matches[: max(0, state.regulation.hand_size_limit - len(player.hand))]
+    player.hand.extend(actual_matches)
+    return len(actual_matches)
+
+
+def _count_drawable_cards_by_category(state: MatchState, player_id: PlayerId, category: str) -> int:
+    player = state.players[player_id]
+    if len(player.hand) >= state.regulation.hand_size_limit:
+        return 0
+    return sum(1 for card_no in player.draw_pile if state.card_catalog[card_no].category == category)
+
+
+def _can_draw_any_card(state: MatchState, player_id: PlayerId) -> bool:
+    player = state.players[player_id]
+    return len(player.hand) < state.regulation.hand_size_limit and bool(player.draw_pile)
+
+
+def _consume_trigger_card(
+    state: MatchState,
+    player_id: PlayerId,
+    triggered_ability: dict[str, Any],
+) -> bool:
+    player = state.players[player_id]
+    source_index = triggered_ability.get("source_index")
+    card_no = triggered_ability["card_no"]
+    if isinstance(source_index, int) and 0 <= source_index < len(player.trigger_zone):
+        if player.trigger_zone[source_index] == card_no:
+            used_card_no = player.trigger_zone.pop(source_index)
+            player.discard_pile.insert(0, used_card_no)
+            return True
+    if card_no in player.trigger_zone:
+        player.trigger_zone.remove(card_no)
+        player.discard_pile.insert(0, card_no)
+        return True
+    return False
 
 
 def _discard_first_card_from_hand(state: MatchState, player_id: PlayerId) -> bool:
@@ -855,6 +942,54 @@ def _destroy_random_trigger_cards(state: MatchState, player_id: PlayerId, count:
         chosen_index = rng.randrange(len(opponent.trigger_zone))
         card_no = opponent.trigger_zone.pop(chosen_index)
         opponent.discard_pile.insert(0, card_no)
+
+
+def _can_use_intercept_card(
+    state: MatchState,
+    player_id: PlayerId,
+    card_no: str,
+    own_unit_is_attacker: bool,
+) -> bool:
+    player = state.players[player_id]
+    card = state.card_catalog[card_no]
+    if card.category != "intercept":
+        return False
+    if (card.cp or 0) > player.current_cp:
+        return False
+    if card.color != "無" and not any(
+        state.card_catalog[unit.card_no].color == card.color for unit in player.battlefield
+    ):
+        return False
+    if card_no == "1-0-081" and not own_unit_is_attacker:
+        return False
+    return card_no in {"1-0-065", "1-0-074", "1-0-081", "1-0-096"}
+
+
+def _get_intercept_target(card_no: str, own_unit_is_attacker: bool) -> str:
+    if card_no == "1-0-065":
+        return "enemy_unit"
+    if card_no == "1-0-081" and own_unit_is_attacker:
+        return "own_unit"
+    return "own_unit"
+
+
+def _resolve_intercept_effect(
+    card_no: str,
+    own_unit: UnitState,
+    enemy_unit: UnitState,
+    own_unit_is_attacker: bool,
+) -> None:
+    if card_no == "1-0-065":
+        enemy_unit.temporary_bp_modifier -= 2000
+        return
+    if card_no == "1-0-074":
+        own_unit.temporary_bp_modifier += 2000
+        return
+    if card_no == "1-0-081" and own_unit_is_attacker:
+        own_unit.temporary_bp_modifier += 3000
+        return
+    if card_no == "1-0-096":
+        own_unit.temporary_bp_modifier += 3000
 
 
 def _resolve_happaloid_enter(
@@ -964,6 +1099,10 @@ def _resolve_draw_trigger_cards(
     triggered_ability: dict[str, Any],
     rng: random.Random,
 ) -> list[AbilityEvent]:
+    if _count_drawable_cards_by_category(state, event.player_id, "trigger") <= 0:
+        return []
+    if not _consume_trigger_card(state, event.player_id, triggered_ability):
+        return []
     _draw_cards_by_category(state, event.player_id, "trigger", 2)
     return []
 
@@ -974,6 +1113,10 @@ def _resolve_draw_intercept_card(
     triggered_ability: dict[str, Any],
     rng: random.Random,
 ) -> list[AbilityEvent]:
+    if _count_drawable_cards_by_category(state, event.player_id, "intercept") <= 0:
+        return []
+    if not _consume_trigger_card(state, event.player_id, triggered_ability):
+        return []
     _draw_cards_by_category(state, event.player_id, "intercept", 1)
     return []
 
@@ -984,6 +1127,10 @@ def _resolve_draw_any_card(
     triggered_ability: dict[str, Any],
     rng: random.Random,
 ) -> list[AbilityEvent]:
+    if not _can_draw_any_card(state, event.player_id):
+        return []
+    if not _consume_trigger_card(state, event.player_id, triggered_ability):
+        return []
     draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
     return []
 
