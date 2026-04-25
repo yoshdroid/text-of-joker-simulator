@@ -209,6 +209,39 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P1"].draw_pile), 36)
         self.assertEqual(len(state.players["P2"].draw_pile), 36)
 
+    # 必要ドロー枚数がデッキ残枚数を上回る場合は、残りデッキを先に引かず、捨札を混ぜた新デッキから引くことを確認する
+    def test_draw_rebuilds_deck_before_drawing(self) -> None:
+        state = self.create_state()
+        player = state.players["P1"]
+        player.hand = []
+        player.draw_pile = ["1-0-001"]
+        player.discard_pile = ["1-0-002", "1-0-003"]
+
+        from tojs.game import draw_cards
+
+        draw_cards(player, 2, random.Random(7), self.regulation.hand_size_limit)
+
+        self.assertEqual(len(player.hand), 2)
+        self.assertNotEqual(player.hand[0], "1-0-001")
+        self.assertEqual(player.discard_pile, [])
+        self.assertEqual(len(player.draw_pile), 1)
+
+    # 山札再構築後は捨札が空になり、必要枚数だけ引いた残りが新しい山札に残ることを確認する
+    def test_draw_rebuild_clears_discard_pile(self) -> None:
+        state = self.create_state()
+        player = state.players["P1"]
+        player.hand = []
+        player.draw_pile = []
+        player.discard_pile = ["1-0-010", "1-0-011", "1-0-012"]
+
+        from tojs.game import draw_cards
+
+        draw_cards(player, 2, random.Random(3), self.regulation.hand_size_limit)
+
+        self.assertEqual(len(player.hand), 2)
+        self.assertEqual(player.discard_pile, [])
+        self.assertEqual(len(player.draw_pile), 1)
+
     # 先攻 1 ターン目はレギュレーション配列どおり 0 枚ドローし、CP だけ設定されることを確認する。
     def test_start_turn_for_first_player_round_one(self) -> None:
         state = self.create_state()
@@ -321,7 +354,7 @@ class GameStateTest(unittest.TestCase):
         self.assertIn("1-0-003", state.players["P1"].hand)
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
 
-    # Lv.2 の同名カード同士を override すると Lv.3 になることを確認する。
+    # Lv.2 の同名カード同士を override すると Lv.3 になり、山札不足時は捨札を含む新山札から 1 枚引くことを確認する。
     def test_apply_override_action_reaches_level_three(self) -> None:
         state = self.create_state()
         start_turn(state, "P1", random.Random(7))
@@ -331,7 +364,7 @@ class GameStateTest(unittest.TestCase):
 
         apply_action(state, "P1", action, random.Random(7))
 
-        self.assertEqual(state.players["P1"].hand, ["1-0-001@L3"])
+        self.assertEqual(state.players["P1"].hand, ["1-0-001@L3", "1-0-001"])
 
     # Lv.3 のカードは override 候補に出ないことを確認する。
     def test_list_available_actions_excludes_override_for_level_three(self) -> None:
@@ -415,6 +448,31 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].trigger_zone, [])
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-062")
 
+    # 対象選択を伴う登場能力では choice_resolver に渡した対象が選ばれることを確認する
+    def test_enter_ability_uses_selected_target(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].hand = ["1-0-051"]
+        state.players["P1"].current_cp = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=10, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="2-0-002", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+        ]
+
+        apply_action(
+            state,
+            "P1",
+            next(action for action in list_available_actions(state, "P1") if action["kind"] == "overdrive"),
+            random.Random(7),
+            choice_resolver=lambda _player_id, _payload: {"kind": "choose_unit", "target_index": 1},
+        )
+
+        self.assertEqual(len(state.players["P2"].battlefield), 1)
+        self.assertEqual(state.players["P2"].battlefield[0].card_no, "2-0-001")
+
     # 効果が全く及ばない trigger は発動せず、trigger_zone に残ることを確認する
     def test_trigger_zone_ability_stays_when_no_effect(self) -> None:
         state = self.create_state()
@@ -468,6 +526,27 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(build_state_update_payload(state, "P1")["players"]["P1"]["battlefield"][0]["current_bp"], 5000)
         apply_action(state, "P1", {"kind": "end_turn"}, random.Random(7))
         self.assertEqual(state.players["P1"].battlefield[0].temporary_bp_modifier, 0)
+
+    # 手札選択を伴うアタック時能力では choice_resolver が選んだ手札が捨札になることを確認する
+    def test_attack_ability_uses_selected_hand_card(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].hand = ["1-0-002", "1-0-003"]
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-010", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        )
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            rng=random.Random(7),
+            choice_resolver=lambda _player_id, _payload: {"kind": "discard_hand", "hand_index": 1},
+        )
+
+        self.assertEqual(state.players["P1"].hand, ["1-0-002"])
+        self.assertEqual(state.players["P1"].discard_pile[0], "1-0-003")
 
     # ランサーのアタック時能力はブロック前に相手ユニットへ 1000 ダメージを与えることを確認する。
     def test_attack_trigger_damage_resolves_before_combat(self) -> None:

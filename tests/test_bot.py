@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from tojs.bot import SimpleBot, choose_action, load_deck
+from tojs.bot import SimpleBot, choose_action, choose_choice, load_deck
 from tojs.protocol import Message
 
 
@@ -39,18 +39,21 @@ class BotTest(unittest.TestCase):
         self.assertEqual(response.payload["kind"], "attack")
 
     # block_request ではブロック可能なら最初の blocker を返すことを確認する。
-    def test_handle_block_request(self) -> None:
+    def test_handle_choice_request_for_block(self) -> None:
         bot = SimpleBot(deck_card_nos=["1-0-001"] * 40)
 
         response = bot.handle(
             Message(
-                type="block_request",
+                type="choice_request",
                 request_id="block-1",
-                payload={"available_actions": [{"kind": "no_block"}, {"kind": "block", "blocker_index": 0}]},
+                payload={
+                    "choice_kind": "block",
+                    "available_choices": [{"kind": "no_block"}, {"kind": "block", "blocker_index": 0}],
+                },
             )
         )
 
-        self.assertEqual(response.type, "block_action")
+        self.assertEqual(response.type, "choice_response")
         self.assertEqual(response.payload["kind"], "block")
 
     # intercept_request では使用可能な intercept があれば最初の 1 枚を選ぶことを確認する
@@ -72,6 +75,36 @@ class BotTest(unittest.TestCase):
 
         self.assertEqual(response.type, "intercept_action")
         self.assertEqual(response.payload["kind"], "use_intercept")
+
+    # choice_request では選択肢の先頭を返すことを確認する
+    def test_handle_choice_request(self) -> None:
+        bot = SimpleBot(deck_card_nos=["1-0-001"] * 40)
+
+        response = bot.handle(
+            Message(
+                type="choice_request",
+                request_id="choice-1",
+                payload={
+                    "available_choices": [
+                        {"kind": "choose_unit", "target_index": 1, "card_no": "2-0-002"},
+                        {"kind": "choose_unit", "target_index": 0, "card_no": "2-0-001"},
+                    ]
+                },
+            )
+        )
+
+        self.assertEqual(response.type, "choice_response")
+        self.assertEqual(response.payload["target_index"], 1)
+
+    def test_choose_choice_prefers_block(self) -> None:
+        chosen = choose_choice(
+            {
+                "choice_kind": "block",
+                "available_choices": [{"kind": "no_block"}, {"kind": "block", "blocker_index": 2}],
+            }
+        )
+
+        self.assertEqual(chosen["kind"], "block")
 
     # bot は overdrive を最優先し、次に override と drive を選ぶことを確認する。
     def test_choose_action_prefers_overdrive(self) -> None:

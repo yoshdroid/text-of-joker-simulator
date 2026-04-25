@@ -18,6 +18,10 @@ class FakePlayerProcess:
         self.received_messages.append(message)
         if message.type == "state_update":
             return Message(type="state_ack", request_id=message.request_id, payload={"received": True})
+        if message.type == "choice_request" and "choice_request" not in self.responses:
+            choices = message.payload.get("available_choices", [])
+            payload = choices[0] if choices else {"kind": "no_choice"}
+            return Message(type="choice_response", request_id=message.request_id, payload=payload)
         queue = self.responses.get(message.type, [])
         if not queue:
             raise AssertionError(f"unexpected message type: {message.type}")
@@ -27,8 +31,8 @@ class FakePlayerProcess:
             "deck_submit": "deck_submit",
             "mulligan_decision": "mulligan_decision",
             "request_action": "action",
-            "block_request": "block_action",
             "intercept_request": "intercept_action",
+            "choice_request": "choice_response",
         }[message.type]
         return Message(type=response_type, request_id=message.request_id, payload=payload)
 
@@ -109,9 +113,53 @@ class MatchRunnerTest(unittest.TestCase):
 
         play_single_action_cycle(state, first_player, second_player, seed=7)
 
-        self.assertFalse(any(message.type == "block_request" for message in second_player.received_messages))
+        self.assertFalse(
+            any(
+                message.type == "choice_request" and message.payload.get("choice_kind") == "block"
+                for message in second_player.received_messages
+            )
+        )
         self.assertEqual(len(state.players["P2"].battlefield), 0)
         self.assertEqual(state.players["P2"].life, 6)
+
+    # 対象選択を伴う能力では choice_request が送られ、選んだ対象に効果が適用されることを確認する
+    def test_choice_request_is_sent_for_targeted_ability(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-004"] * 40,
+            ["1-0-001"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-004", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="1-0-002", unit_id=3, level=1, exhausted=False, attack_restricted=False),
+        ]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
+                "choice_request": [{"kind": "choose_unit", "target_index": 1}],
+            }
+        )
+        second_player = FakePlayerProcess(
+            {
+                "choice_request": [{"kind": "no_block"}],
+            }
+        )
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        self.assertTrue(any(message.type == "choice_request" for message in first_player.received_messages))
+        self.assertEqual(state.players["P2"].battlefield[1].current_damage, 1000)
+        self.assertEqual(state.players["P2"].battlefield[0].current_damage, 0)
 
     # ブロック成立後は戦闘前に intercept_request が送られ、使用した intercept の効果が戦闘結果に反映されることを確認する
     def test_battle_intercept_is_requested_before_combat_damage(self) -> None:
@@ -142,7 +190,7 @@ class MatchRunnerTest(unittest.TestCase):
         )
         second_player = FakePlayerProcess(
             {
-                "block_request": [{"kind": "block", "blocker_index": 0}],
+                "choice_request": [{"kind": "block", "blocker_index": 0}],
             }
         )
 
@@ -187,7 +235,7 @@ class MatchRunnerTest(unittest.TestCase):
         )
         second_player = FakePlayerProcess(
             {
-                "block_request": [{"kind": "block", "blocker_index": 0}],
+                "choice_request": [{"kind": "block", "blocker_index": 0}],
                 "intercept_request": [
                     {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-065"},
                 ],

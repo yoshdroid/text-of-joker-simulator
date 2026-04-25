@@ -49,18 +49,6 @@ class SimpleBot:
                 request_id=message.request_id,
                 payload=chosen_action,
             )
-        if message.type == "block_request":
-            available_actions = message.payload.get("available_actions", [])
-            chosen_action = {"kind": "no_block"}
-            for action in available_actions:
-                if action.get("kind") == "block":
-                    chosen_action = action
-                    break
-            return Message(
-                type="block_action",
-                request_id=message.request_id,
-                payload=chosen_action,
-            )
         if message.type == "intercept_request":
             available_actions = message.payload.get("available_actions", [])
             chosen_action = {"kind": "no_intercept"}
@@ -72,6 +60,13 @@ class SimpleBot:
                 type="intercept_action",
                 request_id=message.request_id,
                 payload=chosen_action,
+            )
+        if message.type == "choice_request":
+            chosen_choice = choose_choice(message.payload)
+            return Message(
+                type="choice_response",
+                request_id=message.request_id,
+                payload=chosen_choice,
             )
         return Message(
             type="error",
@@ -99,6 +94,28 @@ def choose_action(available_actions: list[dict[str, object]]) -> dict[str, objec
         available_actions,
         key=lambda action: (priorities.get(str(action.get("kind")), 99), available_actions.index(action)),
     )
+
+
+def choose_first_option(
+    available_options: list[dict[str, object]],
+    fallback: dict[str, object],
+) -> dict[str, object]:
+    if not available_options:
+        return fallback
+    return available_options[0]
+
+
+def choose_choice(payload: dict[str, object]) -> dict[str, object]:
+    available_choices = payload.get("available_choices", [])
+    if not isinstance(available_choices, list) or not available_choices:
+        return {"kind": "no_choice"}
+    choice_kind = payload.get("choice_kind")
+    if choice_kind == "block":
+        for choice in available_choices:
+            if choice.get("kind") == "block":
+                return choice
+        return {"kind": "no_block"}
+    return choose_first_option(available_choices, {"kind": "no_choice"})
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -40,14 +40,18 @@
 - `mulligan_decision`
 - `state_update`
 - `request_action`
-- `block_request`
 - `intercept_request`
+- `choice_request`
 - `action`
 - `result`
 - `error`
 
 `intercept_request` は戦闘中に複数回届く場合があります。
 攻撃側と防御側が交互に、双方が続けて使用しないと返すまで繰り返されます。
+`use_intercept` で使用したカードは、効果解決後に trigger zone から取り除かれ、捨札へ移動します。
+
+`choice_request` は、能力解決中に対象やコスト支払い用カードを選ぶ必要がある時に届きます。
+現在は、対象ユニットの選択、手札から捨てるカードの選択、ブロッカー選択に使っています。
 
 ## Python bot ひな形の基本フロー
 
@@ -120,6 +124,6 @@
 - `set_trigger`: 手札からカードを trigger_zone の右端へ置く
 - `drive`: 現在は unit 限定で場へ出す
 - `attack`: 現在はプレイヤーアタックのみ
-- `block_request`: 防御側が 1 体だけ blocker を選ぶ
+- `choice_request`: 防御側が 1 体だけ blocker を選ぶ
 
 unit / evolution カードが trigger_zone にあり、同属性 unit を `drive` する場合は、左から最初に見つかった 1 枚が強制的に使われ、コストを 1 軽減してから捨札へ送られます。

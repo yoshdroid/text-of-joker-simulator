@@ -121,6 +121,7 @@ def play_single_action_cycle(
 ) -> MatchState:
     rng = random.Random(seed)
     players = {"P1": first_player, "P2": second_player}
+    choice_resolver = _build_choice_resolver(players, trace_log)
 
     for viewer_id, process in players.items():
         payload = build_state_update_payload(state, viewer_id)
@@ -150,7 +151,7 @@ def play_single_action_cycle(
     if action_response.payload.get("kind") == "attack":
         defender_id = "P2" if actor_id == "P1" else "P1"
         defender = players[defender_id]
-        declare_attack_action(state, actor_id, action_response.payload, rng)
+        declare_attack_action(state, actor_id, action_response.payload, rng, choice_resolver)
 
         for viewer_id, process in players.items():
             payload = build_state_update_payload(state, viewer_id)
@@ -168,17 +169,14 @@ def play_single_action_cycle(
         block_actions = list_available_block_actions(state, defender_id)
         block_payload = {"kind": "no_block"}
         if any(action.get("kind") == "block" for action in block_actions):
-            block_response = _request_with_trace(
-                defender,
+            block_payload = choice_resolver(
                 defender_id,
-                Message(
-                    type="block_request",
-                    request_id=f"block-{state.turn_serial}-{defender_id}",
-                    payload={"available_actions": block_actions},
-                ),
-                trace_log,
+                {
+                    "choice_kind": "block",
+                    "prompt": "Choose a blocker or no block.",
+                    "available_choices": block_actions,
+                },
             )
-            block_payload = block_response.payload
 
         if block_payload.get("kind") == "block":
             attacker = state.players[actor_id].battlefield[action_response.payload["attacker_index"]]
@@ -193,9 +191,9 @@ def play_single_action_cycle(
                 trace_log,
             )
 
-        resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng)
+        resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng, choice_resolver)
     else:
-        apply_action(state, actor_id, action_response.payload, rng)
+        apply_action(state, actor_id, action_response.payload, rng, choice_resolver)
     return state
 
 
@@ -238,6 +236,26 @@ def _request_with_trace(
             }
         )
     return response
+
+
+def _build_choice_resolver(
+    players: dict[str, PlayerProcess],
+    trace_log: TraceLog | None,
+):
+    def resolve_choice(player_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response = _request_with_trace(
+            players[player_id],
+            player_id,
+            Message(
+                type="choice_request",
+                request_id=f"choice-{player_id}",
+                payload=payload,
+            ),
+            trace_log,
+        )
+        return response.payload
+
+    return resolve_choice
 
 
 def _request_battle_intercepts(
