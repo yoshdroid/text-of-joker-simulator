@@ -53,12 +53,13 @@ class BotTest(unittest.TestCase):
         self.assertEqual(response.type, "block_action")
         self.assertEqual(response.payload["kind"], "block")
 
-    # bot は overdrive を最優先し、次に drive を選ぶことを確認する。
+    # bot は overdrive を最優先し、次に override と drive を選ぶことを確認する。
     def test_choose_action_prefers_overdrive(self) -> None:
         chosen = choose_action(
             [
                 {"kind": "set_trigger", "hand_index": 0},
                 {"kind": "attack", "attacker_index": 0},
+                {"kind": "override", "base_index": 0, "material_index": 1},
                 {"kind": "drive", "hand_index": 1},
                 {"kind": "overdrive", "hand_index": 2, "target_index": 0},
                 {"kind": "end_turn"},

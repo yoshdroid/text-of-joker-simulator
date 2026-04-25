@@ -13,10 +13,13 @@ PlayerId = str
 @dataclass
 class UnitState:
     card_no: str
+    unit_id: int = 0
     level: int = 1
     exhausted: bool = False
     attack_restricted: bool = True
     current_damage: int = 0
+    temporary_bp_modifier: int = 0
+    permanent_bp_modifier: int = 0
 
 
 @dataclass
@@ -37,11 +40,20 @@ class MatchState:
     regulation: Regulation
     card_catalog: dict[str, CardDefinition]
     players: dict[PlayerId, PlayerState]
+    next_unit_id: int = 1
     round_no: int = 1
     turn_player_id: PlayerId = "P1"
     turn_serial: int = 0
     winner: str | None = None
     ended_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AbilityEvent:
+    type: str
+    player_id: PlayerId
+    source_unit_id: int | None = None
+    target_player_id: PlayerId | None = None
 
 
 def create_match_state(
@@ -104,9 +116,15 @@ def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> No
 
 
 def end_turn(state: MatchState, rng: random.Random) -> None:
+    resolve_ability_events(
+        state,
+        [AbilityEvent(type="turn_end", player_id=state.turn_player_id)],
+        rng,
+    )
     for player in state.players.values():
         for unit in player.battlefield:
             unit.current_damage = 0
+            unit.temporary_bp_modifier = 0
 
     next_player_id = "P2" if state.turn_player_id == "P1" else "P1"
     if state.turn_player_id == "P2":
@@ -133,14 +151,17 @@ def apply_action(state: MatchState, player_id: PlayerId, action: dict[str, Any],
     if kind == "set_trigger":
         apply_set_trigger_action(state, player_id, action)
         return
+    if kind == "override":
+        apply_override_action(state, player_id, action, rng)
+        return
     if kind == "overdrive":
-        apply_overdrive_action(state, player_id, action)
+        apply_overdrive_action(state, player_id, action, rng)
         return
     if kind == "drive":
-        apply_drive_action(state, player_id, action)
+        apply_drive_action(state, player_id, action, rng)
         return
     if kind == "attack":
-        apply_attack_action(state, player_id, action)
+        apply_attack_action(state, player_id, action, rng=rng)
         return
     if kind == "end_turn":
         end_turn(state, rng)
@@ -249,19 +270,45 @@ def list_available_actions(state: MatchState, player_id: PlayerId) -> list[dict[
     actions: list[dict[str, Any]] = []
 
     if len(player.trigger_zone) < state.regulation.trigger_zone_limit:
-        for hand_index, card_no in enumerate(player.hand):
+        for hand_index, hand_card_id in enumerate(player.hand):
+            card_no, _card_level = parse_hand_card_id(hand_card_id)
             if card_no not in state.card_catalog:
                 continue
             actions.append(
                 {
                     "kind": "set_trigger",
                     "hand_index": hand_index,
-                    "card_no": card_no,
+                    "card_no": hand_card_id,
+                }
+            )
+
+    for base_index, base_hand_card_id in enumerate(player.hand):
+        base_card_no, base_level = parse_hand_card_id(base_hand_card_id)
+        base_card = state.card_catalog.get(base_card_no)
+        if base_card is None or base_card.category not in {"unit", "evolution"}:
+            continue
+        if base_level >= 3:
+            continue
+        for material_index, material_card_no in enumerate(player.hand):
+            material_base_card_no, material_level = parse_hand_card_id(material_card_no)
+            if material_index == base_index or material_base_card_no != base_card_no or material_level != base_level:
+                continue
+            material_card = state.card_catalog.get(material_base_card_no)
+            if material_card is None or material_card.category != base_card.category:
+                continue
+            actions.append(
+                {
+                    "kind": "override",
+                    "base_index": base_index,
+                    "material_index": material_index,
+                    "card_no": base_hand_card_id,
+                    "base_level": base_level,
                 }
             )
 
     if len(player.battlefield) < state.regulation.battlefield_unit_limit:
-        for hand_index, card_no in enumerate(player.hand):
+        for hand_index, hand_card_id in enumerate(player.hand):
+            card_no, card_level = parse_hand_card_id(hand_card_id)
             card = state.card_catalog.get(card_no)
             if card is None or card.category != "unit" or card.cp is None:
                 continue
@@ -271,13 +318,15 @@ def list_available_actions(state: MatchState, player_id: PlayerId) -> list[dict[
                     {
                         "kind": "drive",
                         "hand_index": hand_index,
-                        "card_no": card_no,
+                        "card_no": hand_card_id,
+                        "card_level": card_level,
                         "cost": cost,
                         "trigger_reducer_index": reducer_index,
                     }
                 )
 
-    for hand_index, card_no in enumerate(player.hand):
+    for hand_index, hand_card_id in enumerate(player.hand):
+        card_no, card_level = parse_hand_card_id(hand_card_id)
         card = state.card_catalog.get(card_no)
         if card is None or card.category != "evolution" or card.cp is None:
             continue
@@ -292,11 +341,11 @@ def list_available_actions(state: MatchState, player_id: PlayerId) -> list[dict[
                 {
                     "kind": "overdrive",
                     "hand_index": hand_index,
-                    "card_no": card_no,
+                    "card_no": hand_card_id,
                     "target_index": target_index,
                     "cost": cost,
                     "trigger_reducer_index": reducer_index,
-                    "card_level": 1,
+                    "card_level": card_level,
                 }
             )
 
@@ -332,13 +381,14 @@ def list_available_block_actions(state: MatchState, player_id: PlayerId) -> list
     return actions
 
 
-def apply_drive_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:
+def apply_drive_action(state: MatchState, player_id: PlayerId, action: dict[str, Any], rng: random.Random) -> None:
     player = state.players[player_id]
     hand_index = action["hand_index"]
     if hand_index < 0 or hand_index >= len(player.hand):
         raise ValueError(f"invalid hand index: {hand_index}")
 
-    card_no = player.hand[hand_index]
+    hand_card_id = player.hand[hand_index]
+    card_no, card_level = parse_hand_card_id(hand_card_id)
     card = state.card_catalog.get(card_no)
     if card is None or card.category != "unit" or card.cp is None:
         raise ValueError(f"card is not a drivable unit: {card_no}")
@@ -356,15 +406,27 @@ def apply_drive_action(state: MatchState, player_id: PlayerId, action: dict[str,
     player.battlefield.append(
         UnitState(
             card_no=card_no,
-            level=1,
+            unit_id=_allocate_unit_id(state),
+            level=card_level,
             exhausted=False,
             attack_restricted=True,
             current_damage=0,
         )
     )
+    resolve_ability_events(
+        state,
+        [
+            AbilityEvent(
+                type="unit_entered",
+                player_id=player_id,
+                source_unit_id=player.battlefield[-1].unit_id,
+            )
+        ],
+        rng,
+    )
 
 
-def apply_overdrive_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:
+def apply_overdrive_action(state: MatchState, player_id: PlayerId, action: dict[str, Any], rng: random.Random) -> None:
     player = state.players[player_id]
     hand_index = action["hand_index"]
     target_index = action["target_index"]
@@ -373,12 +435,15 @@ def apply_overdrive_action(state: MatchState, player_id: PlayerId, action: dict[
     if target_index < 0 or target_index >= len(player.battlefield):
         raise ValueError(f"invalid target index: {target_index}")
 
-    card_no = player.hand[hand_index]
+    hand_card_id = player.hand[hand_index]
+    card_no, evolved_level = parse_hand_card_id(hand_card_id)
     card = state.card_catalog.get(card_no)
     if card is None or card.category != "evolution" or card.cp is None:
         raise ValueError(f"card is not an overdrivable evolution: {card_no}")
 
     target_unit = player.battlefield[target_index]
+    if target_unit.unit_id == 0:
+        target_unit.unit_id = _allocate_unit_id(state)
     target_card = state.card_catalog[target_unit.card_no]
     if target_card.color != card.color:
         raise ValueError("overdrive target color mismatch")
@@ -388,7 +453,6 @@ def apply_overdrive_action(state: MatchState, player_id: PlayerId, action: dict[
         raise ValueError("not enough cp")
 
     inherited_exhausted = target_unit.exhausted
-    evolved_level = int(action.get("card_level", 1))
 
     player.current_cp -= overdrive_cost
     player.hand.pop(hand_index)
@@ -398,11 +462,28 @@ def apply_overdrive_action(state: MatchState, player_id: PlayerId, action: dict[
     player.discard_pile.insert(0, target_unit.card_no)
     player.battlefield[target_index] = UnitState(
         card_no=card_no,
+        unit_id=target_unit.unit_id,
         level=evolved_level,
         exhausted=False if evolved_level >= 3 else inherited_exhausted,
         attack_restricted=False,
         current_damage=0,
     )
+    emitted_events = [
+        AbilityEvent(
+            type="unit_entered",
+            player_id=player_id,
+            source_unit_id=player.battlefield[target_index].unit_id,
+        )
+    ]
+    if evolved_level >= 3:
+        emitted_events.append(
+            AbilityEvent(
+                type="unit_overclocked",
+                player_id=player_id,
+                source_unit_id=player.battlefield[target_index].unit_id,
+            )
+        )
+    resolve_ability_events(state, emitted_events, rng)
 
 
 def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:
@@ -414,8 +495,53 @@ def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dic
     if hand_index < 0 or hand_index >= len(player.hand):
         raise ValueError(f"invalid hand index: {hand_index}")
 
-    card_no = player.hand.pop(hand_index)
+    hand_card_id = player.hand.pop(hand_index)
+    card_no, _card_level = parse_hand_card_id(hand_card_id)
     player.trigger_zone.append(card_no)
+
+
+def apply_override_action(
+    state: MatchState,
+    player_id: PlayerId,
+    action: dict[str, Any],
+    rng: random.Random,
+) -> None:
+    player = state.players[player_id]
+    base_index = action["base_index"]
+    material_index = action["material_index"]
+    if base_index < 0 or base_index >= len(player.hand):
+        raise ValueError(f"invalid base index: {base_index}")
+    if material_index < 0 or material_index >= len(player.hand):
+        raise ValueError(f"invalid material index: {material_index}")
+    if base_index == material_index:
+        raise ValueError("override requires two different hand indexes")
+
+    base_hand_card_id = player.hand[base_index]
+    material_hand_card_id = player.hand[material_index]
+    base_card_no, base_level = parse_hand_card_id(base_hand_card_id)
+    material_card_no, material_level = parse_hand_card_id(material_hand_card_id)
+    if base_card_no != material_card_no:
+        raise ValueError("override requires the same card name")
+    if base_level != material_level:
+        raise ValueError("override requires the same current level")
+
+    base_card = state.card_catalog.get(base_card_no)
+    if base_card is None or base_card.category not in {"unit", "evolution"}:
+        raise ValueError(f"card cannot be overridden: {base_card_no}")
+
+    remaining_hand = list(player.hand)
+    higher_index = max(base_index, material_index)
+    lower_index = min(base_index, material_index)
+    remaining_hand.pop(higher_index)
+    remaining_hand.pop(lower_index)
+
+    new_level = min(3, int(action.get("base_level", base_level)) + 1)
+    if int(action.get("base_level", base_level)) >= 3:
+        raise ValueError("level 3 card cannot be overridden")
+
+    player.hand = [format_hand_card_id(base_card_no, new_level)] + remaining_hand
+    player.discard_pile.insert(0, material_card_no)
+    draw_cards(player, 1, rng, state.regulation.hand_size_limit)
 
 
 def apply_attack_action(
@@ -423,6 +549,19 @@ def apply_attack_action(
     player_id: PlayerId,
     action: dict[str, Any],
     block_action: dict[str, Any] | None = None,
+    rng: random.Random | None = None,
+) -> None:
+    if rng is None:
+        rng = random.Random(0)
+    declare_attack_action(state, player_id, action, rng)
+    resolve_declared_attack_action(state, player_id, action, block_action, rng)
+
+
+def declare_attack_action(
+    state: MatchState,
+    player_id: PlayerId,
+    action: dict[str, Any],
+    rng: random.Random,
 ) -> None:
     attacker_owner = state.players[player_id]
     attacker_index = action["attacker_index"]
@@ -438,26 +577,81 @@ def apply_attack_action(
         raise ValueError("first player cannot attack on round one")
 
     attacker.exhausted = True
+    if attacker.unit_id == 0:
+        attacker.unit_id = _allocate_unit_id(state)
+    resolve_ability_events(
+        state,
+        [
+            AbilityEvent(
+                type="unit_attacked",
+                player_id=player_id,
+                source_unit_id=attacker.unit_id,
+                target_player_id=get_opponent_id(player_id),
+            )
+        ],
+        rng,
+    )
+
+
+def resolve_declared_attack_action(
+    state: MatchState,
+    player_id: PlayerId,
+    action: dict[str, Any],
+    block_action: dict[str, Any] | None,
+    rng: random.Random,
+) -> None:
+    attacker_owner = state.players[player_id]
+    attacker_index = action["attacker_index"]
+    if attacker_index < 0 or attacker_index >= len(attacker_owner.battlefield):
+        raise ValueError(f"invalid attacker index: {attacker_index}")
+    attacker = attacker_owner.battlefield[attacker_index]
     defender_id = get_opponent_id(player_id)
     defender = state.players[defender_id]
 
     if block_action is not None and block_action.get("kind") == "block":
         blocker_index = block_action["blocker_index"]
         if blocker_index < 0 or blocker_index >= len(defender.battlefield):
-            raise ValueError(f"invalid blocker index: {blocker_index}")
-        blocker = defender.battlefield[blocker_index]
-        if blocker.exhausted:
-            raise ValueError("blocker is exhausted")
+            block_action = None
+        else:
+            blocker = defender.battlefield[blocker_index]
+            if blocker.exhausted:
+                block_action = None
+            elif blocker.unit_id == 0:
+                blocker.unit_id = _allocate_unit_id(state)
 
+    if block_action is not None and block_action.get("kind") == "block":
+        blocker_index = block_action["blocker_index"]
+        blocker = defender.battlefield[blocker_index]
         blocker.exhausted = True
         attacker.current_damage += get_unit_bp(state, blocker)
         blocker.current_damage += get_unit_bp(state, attacker)
+        attacker_survives = attacker.current_damage < get_unit_bp(state, attacker)
+        blocker_survives = blocker.current_damage < get_unit_bp(state, blocker)
+        emitted_events: list[AbilityEvent] = []
+        if attacker_survives and not blocker_survives:
+            emitted_events.extend(_clock_up_unit(player_id, attacker))
+        elif blocker_survives and not attacker_survives:
+            emitted_events.extend(_clock_up_unit(defender_id, blocker))
+        if emitted_events:
+            resolve_ability_events(state, emitted_events, rng)
         _destroy_broken_units(state, player_id)
         _destroy_broken_units(state, defender_id)
         _update_winner_by_life(state)
         return
 
     defender.life -= 1
+    resolve_ability_events(
+        state,
+        [
+            AbilityEvent(
+                type="player_attack_success",
+                player_id=player_id,
+                source_unit_id=attacker.unit_id,
+                target_player_id=defender_id,
+            )
+        ],
+        rng,
+    )
     _update_winner_by_life(state)
 
 
@@ -483,12 +677,357 @@ def find_trigger_reducer_index(state: MatchState, player_id: PlayerId, card_no: 
     return None
 
 
+def resolve_ability_events(
+    state: MatchState,
+    initial_events: list[AbilityEvent],
+    rng: random.Random,
+) -> None:
+    pending_events = list(initial_events)
+    while pending_events:
+        event = pending_events.pop(0)
+        triggered = collect_triggered_abilities(state, event)
+        for triggered_ability in triggered:
+            emitted = resolve_triggered_ability(state, event, triggered_ability, rng)
+            pending_events.extend(emitted)
+
+
+def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    triggered: list[dict[str, Any]] = []
+    owner = state.players[event.player_id]
+
+    for unit in owner.battlefield:
+        if unit.unit_id == 0:
+            unit.unit_id = _allocate_unit_id(state)
+        if unit.unit_id != event.source_unit_id:
+            continue
+        if supports_ability_event(unit.card_no, event.type):
+            triggered.append(
+                {
+                    "owner_id": event.player_id,
+                    "source_zone": "battlefield",
+                    "source_unit_id": unit.unit_id,
+                    "card_no": unit.card_no,
+                }
+            )
+
+    if event.type == "unit_entered":
+        for index, card_no in enumerate(owner.trigger_zone):
+            if supports_ability_event(card_no, event.type):
+                triggered.append(
+                    {
+                        "owner_id": event.player_id,
+                        "source_zone": "trigger_zone",
+                        "source_index": index,
+                        "card_no": card_no,
+                    }
+                )
+
+    if event.type == "turn_end":
+        for unit in owner.battlefield:
+            if unit.unit_id == 0:
+                unit.unit_id = _allocate_unit_id(state)
+            if supports_ability_event(unit.card_no, event.type):
+                triggered.append(
+                    {
+                        "owner_id": event.player_id,
+                        "source_zone": "battlefield",
+                        "source_unit_id": unit.unit_id,
+                        "card_no": unit.card_no,
+                    }
+                )
+    return triggered
+
+
+def supports_ability_event(card_no: str, event_type: str) -> bool:
+    key = (card_no, event_type)
+    return key in ABILITY_REGISTRY
+
+
+def resolve_triggered_ability(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    key = (
+        triggered_ability["card_no"],
+        event.type,
+    )
+    resolver = ABILITY_REGISTRY.get(key)
+    if resolver is None:
+        return []
+    return resolver(state, event, triggered_ability, rng)
+
+
 def get_unit_bp(state: MatchState, unit: UnitState) -> int:
     card = state.card_catalog[unit.card_no]
     if not card.bp_by_level:
         return 0
     index = min(unit.level, len(card.bp_by_level)) - 1
-    return card.bp_by_level[index]
+    return (
+        card.bp_by_level[index] * 1000
+        + unit.permanent_bp_modifier
+        + unit.temporary_bp_modifier
+    )
+
+
+def _clock_up_unit(player_id: PlayerId, unit: UnitState) -> list[AbilityEvent]:
+    if unit.level >= 3:
+        return []
+    unit.level += 1
+    unit.current_damage = 0
+    emitted: list[AbilityEvent] = []
+    if unit.level >= 3:
+        unit.exhausted = False
+        unit.attack_restricted = False
+        emitted.append(
+            AbilityEvent(
+                type="unit_overclocked",
+                player_id=player_id,
+                source_unit_id=unit.unit_id,
+                target_player_id=get_opponent_id(player_id),
+            )
+        )
+    return emitted
+
+
+def _allocate_unit_id(state: MatchState) -> int:
+    unit_id = state.next_unit_id
+    state.next_unit_id += 1
+    return unit_id
+
+
+def _find_unit_by_id(state: MatchState, player_id: PlayerId, unit_id: int | None) -> UnitState | None:
+    if unit_id is None:
+        return None
+    for unit in state.players[player_id].battlefield:
+        if unit.unit_id == unit_id:
+            return unit
+    return None
+
+
+def _find_first_enemy_unit(state: MatchState, player_id: PlayerId) -> UnitState | None:
+    enemy_id = get_opponent_id(player_id)
+    enemy_units = state.players[enemy_id].battlefield
+    return enemy_units[0] if enemy_units else None
+
+
+def _deal_damage_to_unit(state: MatchState, player_id: PlayerId, unit: UnitState | None, amount: int) -> None:
+    if unit is None:
+        return
+    unit.current_damage += amount
+    _destroy_broken_units(state, player_id)
+
+
+def _draw_cards_by_category(
+    state: MatchState,
+    player_id: PlayerId,
+    category: str,
+    count: int,
+) -> None:
+    player = state.players[player_id]
+    if count <= 0 or len(player.hand) >= state.regulation.hand_size_limit:
+        return
+    matches: list[str] = []
+    remaining: list[str] = []
+    for card_no in player.draw_pile:
+        if len(matches) < count and state.card_catalog[card_no].category == category:
+            matches.append(card_no)
+        else:
+            remaining.append(card_no)
+    player.draw_pile = remaining
+    player.hand.extend(matches[: max(0, state.regulation.hand_size_limit - len(player.hand))])
+
+
+def _discard_first_card_from_hand(state: MatchState, player_id: PlayerId) -> bool:
+    player = state.players[player_id]
+    if not player.hand:
+        return False
+    hand_card_id = player.hand.pop(0)
+    card_no, _level = parse_hand_card_id(hand_card_id)
+    player.discard_pile.insert(0, card_no)
+    return True
+
+
+def _destroy_random_trigger_cards(state: MatchState, player_id: PlayerId, count: int, rng: random.Random) -> None:
+    opponent = state.players[get_opponent_id(player_id)]
+    for _ in range(min(count, len(opponent.trigger_zone))):
+        chosen_index = rng.randrange(len(opponent.trigger_zone))
+        card_no = opponent.trigger_zone.pop(chosen_index)
+        opponent.discard_pile.insert(0, card_no)
+
+
+def _resolve_happaloid_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    return []
+
+
+def _resolve_ririmu_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    enemy_id = get_opponent_id(event.player_id)
+    _deal_damage_to_unit(state, enemy_id, _find_first_enemy_unit(state, event.player_id), 4000)
+    return []
+
+
+def _resolve_barbatos_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    enemy_unit = _find_first_enemy_unit(state, event.player_id)
+    if enemy_unit is not None:
+        enemy_unit.permanent_bp_modifier -= 4000
+        _destroy_broken_units(state, get_opponent_id(event.player_id))
+    return []
+
+
+def _resolve_swordfighter_attack(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    if source is not None:
+        source.temporary_bp_modifier += 2000
+    return []
+
+
+def _resolve_lancer_attack(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    enemy_id = get_opponent_id(event.player_id)
+    _deal_damage_to_unit(state, enemy_id, _find_first_enemy_unit(state, event.player_id), 1000)
+    return []
+
+
+def _resolve_shiranui_attack(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    if source is not None and _discard_first_card_from_hand(state, event.player_id):
+        source.temporary_bp_modifier += 4000
+    return []
+
+
+def _resolve_shiranui_player_attack_success(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    _destroy_random_trigger_cards(state, event.player_id, 2, rng)
+    return []
+
+
+def _resolve_ririmu_attack_trigger_loss(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    _destroy_random_trigger_cards(state, event.player_id, 1, rng)
+    return []
+
+
+def _resolve_goliath_overclock(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    opponent = state.players[get_opponent_id(event.player_id)]
+    opponent.life -= 1
+    _update_winner_by_life(state)
+    return []
+
+
+def _resolve_draw_trigger_cards(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    _draw_cards_by_category(state, event.player_id, "trigger", 2)
+    return []
+
+
+def _resolve_draw_intercept_card(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    _draw_cards_by_category(state, event.player_id, "intercept", 1)
+    return []
+
+
+def _resolve_draw_any_card(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    return []
+
+
+def _resolve_untiring(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+) -> list[AbilityEvent]:
+    source = _find_unit_by_id(state, event.player_id, triggered_ability.get("source_unit_id"))
+    if source is not None:
+        source.exhausted = False
+    return []
+
+
+ABILITY_REGISTRY: dict[tuple[str, str], Any] = {
+    ("1-0-040", "unit_entered"): _resolve_happaloid_enter,
+    ("1-0-012", "unit_entered"): _resolve_ririmu_enter,
+    ("1-0-051", "unit_entered"): _resolve_barbatos_enter,
+    ("1-0-002", "unit_attacked"): _resolve_swordfighter_attack,
+    ("1-0-004", "unit_attacked"): _resolve_lancer_attack,
+    ("1-0-010", "unit_attacked"): _resolve_shiranui_attack,
+    ("1-0-010", "player_attack_success"): _resolve_shiranui_player_attack_success,
+    ("1-0-012", "unit_attacked"): _resolve_ririmu_attack_trigger_loss,
+    ("1-0-007", "unit_overclocked"): _resolve_goliath_overclock,
+    ("1-0-057", "unit_entered"): _resolve_draw_trigger_cards,
+    ("1-0-061", "unit_entered"): _resolve_draw_intercept_card,
+    ("1-0-062", "unit_entered"): _resolve_draw_any_card,
+    ("1-0-044", "turn_end"): _resolve_untiring,
+    ("1-0-048", "turn_end"): _resolve_untiring,
+}
+
+def parse_hand_card_id(hand_card_id: str) -> tuple[str, int]:
+    if "@L" not in hand_card_id:
+        return hand_card_id, 1
+    card_no, level_text = hand_card_id.rsplit("@L", 1)
+    return card_no, int(level_text)
+
+
+def format_hand_card_id(card_no: str, level: int) -> str:
+    if level <= 1:
+        return card_no
+    return f"{card_no}@L{level}"
 
 
 def _serialize_unit(unit: UnitState, state: MatchState | None) -> dict[str, Any]:

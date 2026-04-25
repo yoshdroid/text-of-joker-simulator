@@ -8,12 +8,13 @@ from .engine import BootstrapContext, validate_submitted_deck
 from .game import (
     MatchState,
     apply_action,
-    apply_attack_action,
     apply_mulligan,
     build_state_update_payload,
     create_match_state,
+    declare_attack_action,
     list_available_actions,
     list_available_block_actions,
+    resolve_declared_attack_action,
     start_turn,
 )
 from .player_runner import PlayerProcess
@@ -146,17 +147,37 @@ def play_single_action_cycle(
     if action_response.payload.get("kind") == "attack":
         defender_id = "P2" if actor_id == "P1" else "P1"
         defender = players[defender_id]
-        block_response = _request_with_trace(
-            defender,
-            defender_id,
-            Message(
-                type="block_request",
-                request_id=f"block-{state.turn_serial}-{defender_id}",
-                payload={"available_actions": list_available_block_actions(state, defender_id)},
-            ),
-            trace_log,
-        )
-        apply_attack_action(state, actor_id, action_response.payload, block_response.payload)
+        declare_attack_action(state, actor_id, action_response.payload, rng)
+
+        for viewer_id, process in players.items():
+            payload = build_state_update_payload(state, viewer_id)
+            _request_with_trace(
+                process,
+                viewer_id,
+                Message(
+                    type="state_update",
+                    request_id=f"attack-state-{state.turn_serial}-{viewer_id}",
+                    payload=payload,
+                ),
+                trace_log,
+            )
+
+        block_actions = list_available_block_actions(state, defender_id)
+        block_payload = {"kind": "no_block"}
+        if any(action.get("kind") == "block" for action in block_actions):
+            block_response = _request_with_trace(
+                defender,
+                defender_id,
+                Message(
+                    type="block_request",
+                    request_id=f"block-{state.turn_serial}-{defender_id}",
+                    payload={"available_actions": block_actions},
+                ),
+                trace_log,
+            )
+            block_payload = block_response.payload
+
+        resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng)
     else:
         apply_action(state, actor_id, action_response.payload, rng)
     return state
