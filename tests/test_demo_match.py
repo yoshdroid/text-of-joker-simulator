@@ -30,6 +30,8 @@ class DemoMatchTest(unittest.TestCase):
         self.assertTrue(payload["rendered_messages"][0].startswith("[R"))
         self.assertIn("hello", payload["rendered_messages"][0])
         self.assertTrue(any("state_update" in line and "life=" in line for line in payload["rendered_messages"]))
+        self.assertTrue(any("ユニットドライブ" in line for line in payload["rendered_messages"]))
+        self.assertTrue(any("トリガーゾーンに" in line and "セット" in line for line in payload["rendered_messages"]))
 
 
 if __name__ == "__main__":

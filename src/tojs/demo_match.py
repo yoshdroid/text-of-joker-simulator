@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from .engine import bootstrap
 from .match import play_single_action_cycle, run_boot_sequence
@@ -13,38 +14,12 @@ from .protocol import render_event_log
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a local demo match with example Python bots")
-    parser.add_argument(
-        "--cardpool",
-        default="text-of-joker.cardpool.xlsx",
-        help="Path to cardpool xlsx",
-    )
-    parser.add_argument(
-        "--regulation",
-        default="configs/regulation.default.json",
-        help="Path to regulation json",
-    )
-    parser.add_argument(
-        "--deck1",
-        default="configs/decks/example_deck.json",
-        help="Path to first player's deck json",
-    )
-    parser.add_argument(
-        "--deck2",
-        default="configs/decks/example_deck.json",
-        help="Path to second player's deck json",
-    )
-    parser.add_argument(
-        "--cycles",
-        type=int,
-        default=2,
-        help="Number of action cycles to execute after bootstrap",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=7,
-        help="Random seed",
-    )
+    parser.add_argument("--cardpool", default="text-of-joker.cardpool.xlsx", help="Path to cardpool xlsx")
+    parser.add_argument("--regulation", default="configs/regulation.default.json", help="Path to regulation json")
+    parser.add_argument("--deck1", default="configs/decks/example_deck.json", help="Path to first player's deck json")
+    parser.add_argument("--deck2", default="configs/decks/example_deck.json", help="Path to second player's deck json")
+    parser.add_argument("--cycles", type=int, default=2, help="Number of action cycles to execute after bootstrap")
+    parser.add_argument("--seed", type=int, default=7, help="Random seed")
     return parser
 
 
@@ -53,6 +28,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
     context = bootstrap(Path(args.cardpool), Path(args.regulation))
+    card_catalog = {card.card_no: card for card in context.cardpool}
     first_player = PlayerProcess(build_python_bot_command(Path(args.deck1)), cwd=".")
     second_player = PlayerProcess(build_python_bot_command(Path(args.deck2)), cwd=".")
     trace_log: list[dict[str, object]] = []
@@ -82,7 +58,7 @@ def main() -> int:
                     "status": "ok",
                     "snapshots": snapshots,
                     "messages": trace_log,
-                    "rendered_messages": _render_trace_log(trace_log),
+                    "rendered_messages": _render_trace_log(trace_log, card_catalog),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -118,9 +94,11 @@ def _build_snapshot(label: str, state: object) -> dict[str, object]:
     }
 
 
-def _render_trace_log(trace_log: list[dict[str, object]]) -> list[str]:
+def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str, Any]) -> list[str]:
     rendered: list[str] = []
     latest_round_no = 0
+    previous_private_states: dict[str, dict[str, Any]] = {}
+
     for entry in trace_log:
         message = entry.get("message", {})
         if not isinstance(message, dict):
@@ -132,8 +110,18 @@ def _render_trace_log(trace_log: list[dict[str, object]]) -> list[str]:
         round_no = _extract_round_no_from_request_id(request_id) or latest_round_no
         actor = str(entry.get("player_id", "SYS"))
         direction = "REQ" if entry.get("direction") == "to_player" else "RES"
-        details = _render_message_details(message)
+        details = _render_message_details(message, card_catalog)
         rendered.append(render_event_log(round_no, actor, direction, details))
+
+        if (
+            direction == "REQ"
+            and message.get("type") == "state_update"
+            and isinstance(payload, dict)
+            and payload.get("viewer_player_id") == actor
+        ):
+            previous_state = previous_private_states.get(actor)
+            rendered.extend(_render_state_diff_events(round_no, actor, previous_state, payload, card_catalog))
+            previous_private_states[actor] = payload
     return rendered
 
 
@@ -147,7 +135,7 @@ def _extract_round_no_from_request_id(request_id: str) -> int | None:
     return None
 
 
-def _render_message_details(message: dict[str, object]) -> str:
+def _render_message_details(message: dict[str, object], card_catalog: dict[str, Any]) -> str:
     message_type = str(message.get("type", "unknown"))
     payload = message.get("payload", {})
     if not isinstance(payload, dict):
@@ -164,7 +152,7 @@ def _render_message_details(message: dict[str, object]) -> str:
             lines.append("unavailable=" + ", ".join(_format_choice(choice) for choice in unavailable_choices))
         return " | ".join(lines)
     if message_type in {"action", "choice_response"}:
-        return f"{message_type} {_format_choice(payload)}"
+        return _render_action_message(message_type, payload, card_catalog)
     if message_type == "request_action":
         actions = payload.get("available_actions", [])
         if isinstance(actions, list):
@@ -184,6 +172,31 @@ def _render_message_details(message: dict[str, object]) -> str:
                 summary_parts.append(" || ".join(player_summaries))
         return " | ".join(summary_parts)
     return message_type
+
+
+def _render_action_message(message_type: str, payload: dict[str, Any], card_catalog: dict[str, Any]) -> str:
+    kind = str(payload.get("kind", message_type))
+    card_name = _get_action_card_name(payload, card_catalog)
+    if kind == "drive" and card_name:
+        return f"{message_type} {card_name}をユニットドライブ"
+    if kind == "set_trigger" and card_name:
+        return f"{message_type} トリガーゾーンに{card_name}をセット"
+    if kind == "overdrive" and card_name:
+        return f"{message_type} {card_name}でオーバードライブ"
+    if kind == "override" and card_name:
+        return f"{message_type} {card_name}をオーバーライド"
+    if kind == "attack":
+        return f"{message_type} attack attacker_index={payload.get('attacker_index')}"
+    return f"{message_type} {_format_choice(payload)}"
+
+
+def _get_action_card_name(payload: dict[str, Any], card_catalog: dict[str, Any]) -> str | None:
+    raw_card_no = payload.get("card_no")
+    if not isinstance(raw_card_no, str):
+        return None
+    card_no = raw_card_no.split("@L", 1)[0]
+    card = card_catalog.get(card_no)
+    return getattr(card, "name", None)
 
 
 def _format_choice(choice: object) -> str:
@@ -230,6 +243,123 @@ def _render_battlefield_summary(battlefield: object) -> str:
             status += "/攻撃制限"
         parts.append(f"{card_no}@L{level}:{current_bp}:{status}")
     return ",".join(parts) if parts else "-"
+
+
+def _render_state_diff_events(
+    round_no: int,
+    viewer_id: str,
+    previous_state: dict[str, Any] | None,
+    current_state: dict[str, Any],
+    card_catalog: dict[str, Any],
+) -> list[str]:
+    if previous_state is None:
+        return []
+
+    rendered: list[str] = []
+    current_players = current_state.get("players", {})
+    previous_players = previous_state.get("players", {})
+    if not isinstance(current_players, dict) or not isinstance(previous_players, dict):
+        return []
+
+    current_view = current_players.get(viewer_id, {})
+    previous_view = previous_players.get(viewer_id, {})
+    if not isinstance(current_view, dict) or not isinstance(previous_view, dict):
+        return []
+
+    rendered.extend(_render_life_diff(round_no, viewer_id, previous_players, current_players))
+    rendered.extend(_render_drive_diff(round_no, viewer_id, previous_view, current_view, card_catalog))
+    rendered.extend(_render_trigger_set_diff(round_no, viewer_id, previous_view, current_view, card_catalog))
+    return rendered
+
+
+def _render_life_diff(
+    round_no: int,
+    viewer_id: str,
+    previous_players: dict[str, Any],
+    current_players: dict[str, Any],
+) -> list[str]:
+    rendered: list[str] = []
+    for player_id in current_players:
+        previous_player = previous_players.get(player_id, {})
+        current_player = current_players.get(player_id, {})
+        if not isinstance(previous_player, dict) or not isinstance(current_player, dict):
+            continue
+        previous_life = previous_player.get("life")
+        current_life = current_player.get("life")
+        if isinstance(previous_life, int) and isinstance(current_life, int) and previous_life != current_life:
+            delta = current_life - previous_life
+            rendered.append(
+                render_event_log(
+                    round_no,
+                    viewer_id,
+                    "EVT",
+                    f"{player_id}のライフが{current_life}になった ({delta:+d})",
+                )
+            )
+    return rendered
+
+
+def _render_drive_diff(
+    round_no: int,
+    viewer_id: str,
+    previous_view: dict[str, Any],
+    current_view: dict[str, Any],
+    card_catalog: dict[str, Any],
+) -> list[str]:
+    previous_units = previous_view.get("battlefield", [])
+    current_units = current_view.get("battlefield", [])
+    if not isinstance(previous_units, list) or not isinstance(current_units, list):
+        return []
+    previous_keys = {(unit.get("card_no"), unit.get("level")) for unit in previous_units if isinstance(unit, dict)}
+    rendered: list[str] = []
+    for unit in current_units:
+        if not isinstance(unit, dict):
+            continue
+        key = (unit.get("card_no"), unit.get("level"))
+        if key in previous_keys:
+            continue
+        card_name = _lookup_card_name(unit.get("card_no"), card_catalog)
+        if card_name:
+            rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{viewer_id}が{card_name}をユニットドライブ"))
+    return rendered
+
+
+def _render_trigger_set_diff(
+    round_no: int,
+    viewer_id: str,
+    previous_view: dict[str, Any],
+    current_view: dict[str, Any],
+    card_catalog: dict[str, Any],
+) -> list[str]:
+    previous_zone = previous_view.get("trigger_zone", [])
+    current_zone = current_view.get("trigger_zone", [])
+    if not isinstance(previous_zone, list) or not isinstance(current_zone, list):
+        return []
+    previous_cards = [
+        item.get("card_no")
+        for item in previous_zone
+        if isinstance(item, dict) and isinstance(item.get("card_no"), str)
+    ]
+    current_cards = [
+        item.get("card_no")
+        for item in current_zone
+        if isinstance(item, dict) and isinstance(item.get("card_no"), str)
+    ]
+    if len(current_cards) <= len(previous_cards):
+        return []
+    rendered: list[str] = []
+    for card_no in current_cards[len(previous_cards) :]:
+        card_name = _lookup_card_name(card_no, card_catalog)
+        if card_name:
+            rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{viewer_id}がトリガーゾーンに{card_name}をセット"))
+    return rendered
+
+
+def _lookup_card_name(card_no: object, card_catalog: dict[str, Any]) -> str | None:
+    if not isinstance(card_no, str):
+        return None
+    card = card_catalog.get(card_no)
+    return getattr(card, "name", None)
 
 
 if __name__ == "__main__":
