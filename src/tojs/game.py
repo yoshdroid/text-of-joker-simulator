@@ -115,38 +115,17 @@ def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> No
     player = state.players[player_id]
     draw_count = get_scheduled_draw_count(state, player)
     cp_value = get_scheduled_cp(state, player)
-    drawn_cards = _draw_card_nos(player, draw_count, rng, state.regulation.hand_size_limit)
-    _record_draw_card_moves(state, player_id, drawn_cards, reason="turn_start_draw")
     resolve_ability_events(
         state,
         [
             AbilityEvent(
-                type="turn_start_draw",
+                type="turn_started",
                 player_id=player_id,
-                amount=len(drawn_cards),
-                metadata={"drawn_card_nos": list(drawn_cards)},
+                metadata={"scheduled_draw_count": draw_count, "scheduled_cp": cp_value},
             ),
         ],
         rng,
     )
-    previous_cp = player.current_cp
-    player.current_cp = min(cp_value, state.regulation.max_cp_per_round)
-    resolve_ability_events(
-        state,
-        [
-            AbilityEvent(
-                type="turn_start_cp_set",
-                player_id=player_id,
-                amount=player.current_cp - previous_cp,
-                metadata={"before_cp": previous_cp, "after_cp": player.current_cp, "set_cp": player.current_cp},
-            ),
-        ],
-        rng,
-    )
-    for unit in player.battlefield:
-        if unit.level >= 1:
-            unit.exhausted = False
-        unit.attack_restricted = False
 
 
 def end_turn(state: MatchState, rng: random.Random) -> None:
@@ -848,6 +827,15 @@ def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dic
     _record_ability_event(
         state,
         AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=card_no,
+            metadata={"from_zone": "hand", "to_zone": "trigger_zone", "reason": "set_trigger"},
+        ),
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
             type="card_set_to_trigger_zone",
             player_id=player_id,
             source_card_no=card_no,
@@ -1166,7 +1154,24 @@ def apply_intercept_action(
         raise ValueError(f"intercept cannot be used: {card_no}")
 
     card = state.card_catalog[card_no]
+    previous_cp = player.current_cp
     player.current_cp -= card.cp or 0
+    if card.cp and card.cp > 0:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="cp_changed",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=card_no,
+                amount=-(card.cp or 0),
+                metadata={
+                    "reason": "intercept_use",
+                    "before_cp": previous_cp,
+                    "after_cp": player.current_cp,
+                },
+            ),
+        )
     used_card_no = player.trigger_zone.pop(trigger_index)
     player.discard_pile.insert(0, used_card_no)
     _record_ability_event(
@@ -1223,10 +1228,65 @@ def resolve_ability_events(
     while pending_events:
         event = pending_events.pop(0)
         _record_ability_event(state, event)
+        next_events = _resolve_system_event(state, event, rng)
         triggered = collect_triggered_abilities(state, event)
         for triggered_ability in triggered:
             emitted = resolve_triggered_ability(state, event, triggered_ability, rng, choice_resolver)
-            pending_events.extend(emitted)
+            next_events.extend(emitted)
+        pending_events = next_events + pending_events
+
+
+def _resolve_system_event(state: MatchState, event: AbilityEvent, rng: random.Random) -> list[AbilityEvent]:
+    if event.type != "turn_started":
+        return []
+    player = state.players[event.player_id]
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    scheduled_draw_count = metadata.get("scheduled_draw_count")
+    scheduled_cp = metadata.get("scheduled_cp")
+    draw_count = scheduled_draw_count if isinstance(scheduled_draw_count, int) else get_scheduled_draw_count(state, player)
+    cp_value = scheduled_cp if isinstance(scheduled_cp, int) else get_scheduled_cp(state, player)
+
+    drawn_cards = _draw_card_nos(player, draw_count, rng, state.regulation.hand_size_limit)
+    _record_draw_card_moves(state, event.player_id, drawn_cards, reason="turn_start_draw")
+
+    emitted: list[AbilityEvent] = [
+        AbilityEvent(
+            type="turn_start_draw",
+            player_id=event.player_id,
+            amount=len(drawn_cards),
+            metadata={"drawn_card_nos": list(drawn_cards)},
+        )
+    ]
+
+    previous_cp = player.current_cp
+    player.current_cp = min(cp_value, state.regulation.max_cp_per_round)
+    emitted.append(
+        AbilityEvent(
+            type="turn_start_cp_set",
+            player_id=event.player_id,
+            amount=player.current_cp - previous_cp,
+            metadata={"before_cp": previous_cp, "after_cp": player.current_cp, "set_cp": player.current_cp},
+        )
+    )
+
+    for unit in player.battlefield:
+        if unit.unit_id == 0:
+            unit.unit_id = _allocate_unit_id(state)
+        recovered = unit.level >= 1 and unit.exhausted
+        if unit.level >= 1:
+            unit.exhausted = False
+        unit.attack_restricted = False
+        if recovered:
+            emitted.append(
+                AbilityEvent(
+                    type="unit_action_recovered",
+                    player_id=event.player_id,
+                    source_unit_id=unit.unit_id,
+                    source_card_no=unit.card_no,
+                    metadata={"reason": "turn_start_recover"},
+                )
+            )
+    return emitted
 
 
 def _record_ability_event(state: MatchState, event: AbilityEvent) -> None:
@@ -1280,7 +1340,7 @@ def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[
                 )
             )
 
-    if event.type in {"turn_end", "turn_start_draw", "turn_start_cp_set", "cards_drawn", "cp_changed", "life_changed"}:
+    if event.type in {"turn_started", "turn_end", "turn_start_draw", "turn_start_cp_set", "cards_drawn", "cp_changed", "life_changed"}:
         for unit in owner.battlefield:
             if unit.unit_id == 0:
                 unit.unit_id = _allocate_unit_id(state)
@@ -2051,7 +2111,24 @@ def apply_reactive_intercept_action(
     card = state.card_catalog[card_no]
     if (card.cp or 0) > player.current_cp:
         raise ValueError("not enough cp")
+    previous_cp = player.current_cp
     player.current_cp -= card.cp or 0
+    if card.cp and card.cp > 0:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="cp_changed",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=card_no,
+                amount=-(card.cp or 0),
+                metadata={
+                    "reason": "reactive_intercept_use",
+                    "before_cp": previous_cp,
+                    "after_cp": player.current_cp,
+                },
+            ),
+        )
     used_card_no = player.trigger_zone.pop(trigger_index)
     player.discard_pile.insert(0, used_card_no)
     _record_ability_event(
@@ -2328,9 +2405,18 @@ def _resolve_untiring(
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
     source = _find_unit_by_id(state, event.player_id, triggered_ability.get("source_unit_id"))
-    if source is not None:
-        source.exhausted = False
-    return []
+    if source is None or not source.exhausted:
+        return []
+    source.exhausted = False
+    return [
+        AbilityEvent(
+            type="unit_action_recovered",
+            player_id=event.player_id,
+            source_unit_id=source.unit_id,
+            source_card_no=source.card_no,
+            metadata={"reason": "untiring"},
+        )
+    ]
 
 
 def _resolve_revive_overclock(

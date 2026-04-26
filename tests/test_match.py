@@ -258,6 +258,7 @@ class MatchRunnerTest(unittest.TestCase):
         event_types = [event["type"] for event in state.event_log]
         self.assertIn("player_attack_success", event_types)
         self.assertIn("turn_end", event_types)
+        self.assertIn("unit_action_recovered", event_types)
 
     def test_choice_request_is_sent_for_targeted_ability(self) -> None:
         card_catalog = {card.card_no: card for card in self.context.cardpool}

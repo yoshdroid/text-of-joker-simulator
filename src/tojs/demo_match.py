@@ -112,7 +112,6 @@ def _render_trace_log(
     request_rounds: dict[str, int] = {}
     game_event_cursor = 0
     safe_game_events = [event for event in (game_events or []) if isinstance(event, dict)]
-    previous_shared_state: dict[str, Any] | None = None
 
     for entry in trace_log:
         message = entry.get("message", {})
@@ -141,12 +140,6 @@ def _render_trace_log(
         action_event = _render_system_event_from_message(round_no, actor, direction, message, card_catalog)
         if action_event is not None:
             rendered.append(action_event)
-
-        if direction == "REQ" and message.get("type") == "state_update" and isinstance(payload, dict):
-            current_shared_state = _build_shared_state_snapshot(payload)
-            if current_shared_state is not None:
-                rendered.extend(_render_state_diff_events(round_no, previous_shared_state, current_shared_state))
-                previous_shared_state = current_shared_state
 
     rendered.extend(_render_game_events_slice(safe_game_events, game_event_cursor, len(safe_game_events), card_catalog))
     return _attach_round_event_numbers(rendered)
@@ -278,33 +271,6 @@ def _render_battlefield_summary(battlefield: object) -> str:
     return ",".join(parts) if parts else "-"
 
 
-def _render_state_diff_events(
-    round_no: int,
-    previous_state: dict[str, Any] | None,
-    current_state: dict[str, Any],
-) -> list[str]:
-    return []
-
-
-def _render_life_diff(
-    round_no: int,
-    previous_players: dict[str, Any],
-    current_players: dict[str, Any],
-) -> list[str]:
-    rendered: list[str] = []
-    for player_id in current_players:
-        previous_player = previous_players.get(player_id, {})
-        current_player = current_players.get(player_id, {})
-        if not isinstance(previous_player, dict) or not isinstance(current_player, dict):
-            continue
-        previous_life = previous_player.get("life")
-        current_life = current_player.get("life")
-        if isinstance(previous_life, int) and isinstance(current_life, int) and previous_life != current_life:
-            delta = current_life - previous_life
-            rendered.append(render_event_log(round_no, "SYS", "EVT", f"{player_id}のライフが{current_life}になった ({delta:+d})"))
-    return rendered
-
-
 def _render_game_events_slice(
     game_events: list[dict[str, Any]],
     start_index: int,
@@ -321,30 +287,6 @@ def _render_game_events_slice(
     return rendered
 
 
-def _build_shared_state_snapshot(payload: dict[str, Any]) -> dict[str, Any] | None:
-    players = payload.get("players", {})
-    if not isinstance(players, dict):
-        return None
-    snapshot_players: dict[str, Any] = {}
-    for player_id, player_view in players.items():
-        if not isinstance(player_view, dict):
-            continue
-        snapshot_players[str(player_id)] = {
-            "life": player_view.get("life"),
-            "current_cp": player_view.get("current_cp"),
-            "hand_count": player_view.get("hand_count"),
-            "deck_count": player_view.get("deck_count"),
-            "battlefield": player_view.get("battlefield"),
-            "trigger_zone": player_view.get("trigger_zone"),
-        }
-    return {
-        "round_no": payload.get("round_no"),
-        "turn_serial": payload.get("turn_serial"),
-        "turn_player_id": payload.get("turn_player_id"),
-        "players": snapshot_players,
-    }
-
-
 def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any]) -> str | None:
     event_type = str(event.get("type", ""))
     player_id = str(event.get("player_id") or "SYS")
@@ -358,6 +300,8 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
     drawn_card_names = _lookup_card_names(metadata.get("drawn_card_nos"), card_catalog)
     drawn_suffix = f" ({' / '.join(drawn_card_names)})" if drawn_card_names else ""
 
+    if event_type == "turn_started":
+        return f"{player_id}のターン開始"
     if event_type == "turn_start_draw" and isinstance(amount, int):
         return f"{player_id}がターン開始時に{amount}枚ドロー{drawn_suffix}"
     if event_type == "turn_start_cp_set" and isinstance(amount, int):
@@ -450,12 +394,21 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
                 return f"{player_id}の{source_card_name}のレベルがオーバードライブで Lv.{from_level} -> Lv.{to_level}"
             return f"{player_id}の{source_card_name}のレベルが Lv.{from_level} -> Lv.{to_level}"
         return f"{player_id}の{source_card_name}のレベルが変化"
+    if event_type == "unit_action_recovered" and source_card_name:
+        reason = metadata.get("reason")
+        if reason == "untiring":
+            return f"{player_id}の{source_card_name}が不屈で行動権を回復"
+        if reason == "turn_start_recover":
+            return f"{player_id}の{source_card_name}がターン開始で行動権を回復"
+        return f"{player_id}の{source_card_name}の行動権が回復"
     if event_type == "card_moved" and source_card_name:
         from_zone = metadata.get("from_zone")
         to_zone = metadata.get("to_zone")
         reason = metadata.get("reason")
+        if from_zone == "hand" and to_zone == "trigger_zone" and reason == "set_trigger":
+            return None
         if from_zone == "deck" and to_zone == "hand" and reason == "turn_start_draw":
-            return f"{player_id}が{source_card_name}を山札から手札に加える"
+            return None
         if from_zone == "deck" and to_zone == "hand" and reason == "override_draw":
             return f"{player_id}が{source_card_name}をオーバーライドのドローで手札に加える"
         if from_zone == "deck" and to_zone == "hand" and isinstance(reason, str) and reason.startswith("draw_by_category:"):
@@ -498,6 +451,8 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
             return f"ユニットドライブで{player_id}のCPが{amount:+d}{cp_change_suffix}"
         if reason == "overdrive":
             return f"オーバードライブで{player_id}のCPが{amount:+d}{cp_change_suffix}"
+        if reason in {"intercept_use", "reactive_intercept_use"} and source_card_name:
+            return f"{source_card_name}の使用で{player_id}のCPが{amount:+d}{cp_change_suffix}"
         if source_card_name:
             return f"{source_card_name}の効果で{player_id}のCPが{amount:+d}{cp_change_suffix}"
         return f"{player_id}のCPが{amount:+d}{cp_change_suffix}"

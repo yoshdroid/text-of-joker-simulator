@@ -257,12 +257,13 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.turn_serial, 1)
         self.assertEqual(len(state.players["P1"].hand), 4)
         self.assertEqual(state.players["P1"].current_cp, 2)
-        self.assertEqual(state.event_log[0]["type"], "turn_start_draw")
-        self.assertEqual(state.event_log[0]["amount"], 0)
-        self.assertEqual(state.event_log[0]["metadata"]["drawn_card_nos"], [])
-        self.assertEqual(state.event_log[1]["type"], "turn_start_cp_set")
-        self.assertEqual(state.event_log[1]["amount"], 2)
-        self.assertEqual(state.event_log[1]["metadata"]["set_cp"], 2)
+        self.assertEqual(state.event_log[0]["type"], "turn_started")
+        self.assertEqual(state.event_log[1]["type"], "turn_start_draw")
+        self.assertEqual(state.event_log[1]["amount"], 0)
+        self.assertEqual(state.event_log[1]["metadata"]["drawn_card_nos"], [])
+        self.assertEqual(state.event_log[2]["type"], "turn_start_cp_set")
+        self.assertEqual(state.event_log[2]["amount"], 2)
+        self.assertEqual(state.event_log[2]["metadata"]["set_cp"], 2)
 
     # state_update では自分の手札は見えるが、相手の手札内容は見えないことを確認する。
     def test_build_state_update_payload_hides_opponent_hand(self) -> None:
@@ -371,7 +372,11 @@ class GameStateTest(unittest.TestCase):
 
         apply_action(state, "P1", action, random.Random(7))
 
+        move_event = state.event_log[-2]
         event = state.event_log[-1]
+        self.assertEqual(move_event["type"], "card_moved")
+        self.assertEqual(move_event["metadata"]["from_zone"], "hand")
+        self.assertEqual(move_event["metadata"]["to_zone"], "trigger_zone")
         self.assertEqual(event["type"], "card_set_to_trigger_zone")
         self.assertEqual(event["player_id"], "P1")
         self.assertEqual(event["source_card_no"], state.players["P1"].trigger_zone[0])
@@ -1362,6 +1367,27 @@ class GameStateTest(unittest.TestCase):
         apply_action(state, "P1", {"kind": "end_turn"}, random.Random(7))
 
         self.assertFalse(state.players["P1"].battlefield[0].exhausted)
+        action_recovered_event = next(event for event in state.event_log if event["type"] == "unit_action_recovered")
+        self.assertEqual(action_recovered_event["player_id"], "P1")
+        self.assertEqual(action_recovered_event["source_card_no"], "1-0-021")
+        self.assertEqual(action_recovered_event["metadata"]["reason"], "untiring")
+
+    def test_start_turn_recovers_exhausted_unit_and_records_event(self) -> None:
+        state = self.create_state()
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-021", unit_id=1, level=1, exhausted=True, attack_restricted=True)
+        ]
+
+        start_turn(state, "P1", random.Random(7))
+
+        unit = state.players["P1"].battlefield[0]
+        self.assertFalse(unit.exhausted)
+        self.assertFalse(unit.attack_restricted)
+        action_recovered_event = next(event for event in state.event_log if event["type"] == "unit_action_recovered")
+        self.assertEqual(action_recovered_event["player_id"], "P1")
+        self.assertEqual(action_recovered_event["source_card_no"], "1-0-021")
+        self.assertEqual(action_recovered_event["metadata"]["reason"], "turn_start_recover")
 
     # 攻撃側が戦闘勝利した時はクロックアップし、ダメージが全快することを確認する。
     def test_clock_up_on_attacker_battle_win(self) -> None:
@@ -1885,6 +1911,10 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(len(state.players["P2"].battlefield), 1)
         self.assertEqual(state.players["P2"].battlefield[0].level, 1)
+        cp_event = next(event for event in state.event_log if event["type"] == "cp_changed")
+        self.assertEqual(cp_event["metadata"]["reason"], "reactive_intercept_use")
+        self.assertEqual(cp_event["metadata"]["before_cp"], 1)
+        self.assertEqual(cp_event["metadata"]["after_cp"], 0)
 
     # ダーク・アーマーは自ユニットにBP+7000し、自分のライフを1減らすことを確認する。
     def test_battle_intercept_dark_armor_adds_bp_and_costs_life(self) -> None:
@@ -1930,6 +1960,10 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(own_unit.temporary_bp_modifier, 7000)
         self.assertEqual(state.players["P1"].life, 6)
+        cp_event = next(event for event in state.event_log if event["type"] == "cp_changed")
+        self.assertEqual(cp_event["metadata"]["reason"], "intercept_use")
+        self.assertEqual(cp_event["metadata"]["before_cp"], 1)
+        self.assertEqual(cp_event["metadata"]["after_cp"], 0)
         bp_index = next(index for index, event in enumerate(state.event_log) if event["type"] == "unit_bp_modified")
         life_index = next(
             index

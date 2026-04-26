@@ -155,7 +155,7 @@ class DemoMatchTest(unittest.TestCase):
                         "payload": {
                             "round_no": 2,
                             "turn_serial": 3,
-                            "event_log_count": 2,
+                            "event_log_count": 3,
                             "viewer_player_id": "P1",
                             "turn_player_id": "P1",
                             "players": {
@@ -168,6 +168,7 @@ class DemoMatchTest(unittest.TestCase):
             ],
             {},
             [
+                {"round_no": 2, "player_id": "P1", "type": "turn_started"},
                 {"round_no": 2, "player_id": "P1", "type": "turn_start_draw", "amount": 2},
                 {
                     "round_no": 2,
@@ -179,11 +180,13 @@ class DemoMatchTest(unittest.TestCase):
             ],
         )
 
-        self.assertIn("ターン開始時に2枚ドロー", rendered[0])
-        self.assertIn("ターン開始 CPセット 3", rendered[1])
-        self.assertIn("[REQ] state_update", rendered[2])
+        self.assertIn("ターン開始", rendered[0])
+        self.assertIn("ターン開始時に2枚ドロー", rendered[1])
+        self.assertIn("ターン開始 CPセット 3", rendered[2])
+        self.assertIn("[REQ] state_update", rendered[3])
         self.assertTrue(rendered[0].startswith("[R02][E001] "))
         self.assertTrue(rendered[1].startswith("[R02][E002] "))
+        self.assertTrue(rendered[2].startswith("[R02][E003] "))
 
     # show_reqres=FalseのときはREQ/RES行が省かれることを確認する
     def test_render_trace_log_can_hide_reqres(self) -> None:
@@ -402,6 +405,32 @@ class DemoMatchTest(unittest.TestCase):
         self.assertTrue(any("ランサーをオーバーライド Lv.1 -> Lv.2" in line for line in rendered))
         self.assertTrue(any("ランサーを撤退させる" in line for line in rendered))
 
+    def test_render_trace_log_does_not_duplicate_set_trigger_move_event(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-061": type("Card", (), {"name": "不可侵防壁"})(),
+            },
+            [
+                {
+                    "round_no": 4,
+                    "player_id": "P1",
+                    "type": "card_moved",
+                    "source_card_no": "1-0-061",
+                    "metadata": {"from_zone": "hand", "to_zone": "trigger_zone", "reason": "set_trigger"},
+                },
+                {
+                    "round_no": 4,
+                    "player_id": "P1",
+                    "type": "card_set_to_trigger_zone",
+                    "source_card_no": "1-0-061",
+                },
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R04][E001] P1がトリガーゾーンに不可侵防壁をセット"])
+
     # 対象ユニットに与える能力ダメージもカード名つきで描画されることを確認する。
     def test_render_trace_log_renders_targeted_ability_damage(self) -> None:
         rendered = _render_trace_log(
@@ -476,6 +505,27 @@ class DemoMatchTest(unittest.TestCase):
 
         self.assertEqual(rendered, ["[R02][E001] ユニットドライブでP1のCPが-2 (2 -> 0)"])
 
+    def test_render_trace_log_renders_intercept_cp_cost_without_effect_wording(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-091": type("Card", (), {"name": "ダーク・アーマー"})(),
+            },
+            [
+                {
+                    "round_no": 2,
+                    "player_id": "P1",
+                    "type": "cp_changed",
+                    "source_card_no": "1-0-091",
+                    "amount": -1,
+                    "metadata": {"reason": "intercept_use", "before_cp": 1, "after_cp": 0},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R02][E001] ダーク・アーマーの使用でP1のCPが-1 (1 -> 0)"])
+
     def test_render_trace_log_renders_trigger_and_intercept_with_card_names(self) -> None:
         rendered = _render_trace_log(
             [
@@ -534,6 +584,44 @@ class DemoMatchTest(unittest.TestCase):
         self.assertTrue(any("ハッパロイドの効果でP1が1枚ドロー" in line for line in rendered))
         self.assertTrue(any("Red Unit 3" in line for line in rendered))
         self.assertTrue(any("山札から手札に加える" in line and "Red Unit 3" in line for line in rendered))
+
+    def test_render_trace_log_masks_individual_turn_start_draw_moves(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-062": type("Card", (), {"name": "何でも屋の陳列台"})(),
+                "1-0-031": type("Card", (), {"name": "見習い魔導士リーナ"})(),
+            },
+            [
+                {
+                    "round_no": 1,
+                    "player_id": "P2",
+                    "type": "card_moved",
+                    "source_card_no": "1-0-062",
+                    "metadata": {"from_zone": "deck", "to_zone": "hand", "reason": "turn_start_draw"},
+                },
+                {
+                    "round_no": 1,
+                    "player_id": "P2",
+                    "type": "card_moved",
+                    "source_card_no": "1-0-031",
+                    "metadata": {"from_zone": "deck", "to_zone": "hand", "reason": "turn_start_draw"},
+                },
+                {
+                    "round_no": 1,
+                    "player_id": "P2",
+                    "type": "turn_start_draw",
+                    "amount": 2,
+                    "metadata": {"drawn_card_nos": ["1-0-062", "1-0-031"]},
+                },
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(
+            rendered,
+            ["[R01][E001] P2がターン開始時に2枚ドロー (何でも屋の陳列台 / 見習い魔導士リーナ)"],
+        )
 
     def test_render_trace_log_renders_revive_move(self) -> None:
         rendered = _render_trace_log(
@@ -596,6 +684,46 @@ class DemoMatchTest(unittest.TestCase):
         )
 
         self.assertEqual(rendered, ["[R04][E001] P1の勝利 (P1 LIFE 7 / P2 LIFE 0)"])
+
+    def test_render_trace_log_renders_untiring_action_recovery(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-044": type("Card", (), {"name": "キャットムル"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "type": "unit_action_recovered",
+                    "source_card_no": "1-0-044",
+                    "metadata": {"reason": "untiring"},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R03][E001] P1のキャットムルが不屈で行動権を回復"])
+
+    def test_render_trace_log_renders_turn_start_action_recovery(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-044": type("Card", (), {"name": "キャットムル"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "type": "unit_action_recovered",
+                    "source_card_no": "1-0-044",
+                    "metadata": {"reason": "turn_start_recover"},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R03][E001] P1のキャットムルがターン開始で行動権を回復"])
 
     def test_render_trace_log_does_not_render_noop_overdrive_level_change(self) -> None:
         rendered = _render_trace_log(
