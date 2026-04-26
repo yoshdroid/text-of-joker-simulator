@@ -166,6 +166,99 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertEqual(state.players["P2"].life, 6)
 
     # 対象選択を伴う能力では choice_request が送られ、選んだ対象に効果が適用されることを確認する
+    # battle testcase 001: ランサーの攻撃時効果でブロッカーが先に破壊され、破壊時効果を経てプレイヤーアタックになることを確認する。
+    def test_battle_testcase_001_lancer_breaks_karasumadou_before_block(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-004"] * 40,
+            ["1-0-029"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-004", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-029", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].hand = []
+        state.players["P2"].draw_pile = ["1-0-061", "1-0-074", "1-0-001", "1-0-002"]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "attack", "attacker_index": 0, "target": "player"}],
+                "choice_request": [{"kind": "choose_unit", "target_index": 0}],
+            }
+        )
+        second_player = FakePlayerProcess({})
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        self.assertFalse(
+            any(
+                message.type == "choice_request" and message.payload.get("choice_kind") == "block"
+                for message in second_player.received_messages
+            )
+        )
+        self.assertEqual(state.players["P2"].battlefield, [])
+        self.assertEqual(state.players["P2"].life, 6)
+        self.assertEqual(len(state.players["P2"].hand), 1)
+        self.assertEqual(state.card_catalog[state.players["P2"].hand[0]].category, "intercept")
+
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("attack_declared", event_types)
+        self.assertIn("unit_destroyed", event_types)
+        self.assertIn("cards_drawn", event_types)
+        self.assertIn("player_attack_success", event_types)
+        self.assertLess(event_types.index("unit_destroyed"), event_types.index("cards_drawn"))
+        self.assertLess(event_types.index("cards_drawn"), event_types.index("player_attack_success"))
+
+    # effect testcase 001: キャットムルでプレイヤーアタックした後、ターン終了時に不屈で行動権が回復することを確認する。
+    def test_effect_testcase_001_catmule_recovers_exhaustion_on_turn_end(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-044"] * 40,
+            ["1-0-001"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-044", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = []
+        state.players["P2"].life = 7
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [
+                    {"kind": "attack", "attacker_index": 0, "target": "player"},
+                    {"kind": "end_turn"},
+                ],
+            }
+        )
+        second_player = FakePlayerProcess({})
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        self.assertEqual(state.players["P2"].life, 6)
+        self.assertTrue(state.players["P1"].battlefield[0].exhausted)
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        self.assertEqual(state.turn_player_id, "P2")
+        self.assertFalse(state.players["P1"].battlefield[0].exhausted)
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("player_attack_success", event_types)
+        self.assertIn("turn_end", event_types)
+
     def test_choice_request_is_sent_for_targeted_ability(self) -> None:
         card_catalog = {card.card_no: card for card in self.context.cardpool}
         state = create_match_state(

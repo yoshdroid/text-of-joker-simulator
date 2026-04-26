@@ -1127,6 +1127,45 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].battlefield[0].current_damage, 0)
         self.assertEqual(len(state.players["P2"].battlefield), 0)
 
+    # 戦闘では宣言、ダメージ、勝敗、捨札送り、クロックアップがイベント列に記録されることを確認する。
+    def test_battle_records_combat_events(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.card_catalog["2-0-001"] = CardDefinition(
+            card_no="2-0-001",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Weak Blue Unit",
+            cp=1,
+            bp_by_level=(1, 1, 1),
+            abilities=(),
+            race="test",
+        )
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        )
+        state.players["P2"].battlefield.append(
+            UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        )
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+        )
+
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("attack_declared", event_types)
+        self.assertIn("block_declared", event_types)
+        self.assertIn("battle_bp_changed", event_types)
+        self.assertIn("battle_resolved", event_types)
+        self.assertIn("unit_sent_to_discard", event_types)
+        self.assertIn("unit_clock_up", event_types)
+
     # 防御側が戦闘勝利した時もクロックアップすることを確認する。
     def test_clock_up_on_blocker_battle_win(self) -> None:
         state = self.create_state()

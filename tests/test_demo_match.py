@@ -318,21 +318,36 @@ class DemoMatchTest(unittest.TestCase):
                     },
                 },
                 {
-                    "direction": "from_player",
-                    "player_id": "P1",
-                    "message": {
-                        "type": "action",
-                        "request_id": "action-3-5-P1",
-                        "payload": {"kind": "attack", "attacker_index": 0, "target": "player"},
-                    },
-                },
-                {
-                    "direction": "from_player",
+                    "direction": "to_player",
                     "player_id": "P2",
                     "message": {
-                        "type": "choice_response",
-                        "request_id": "choice-3-5-1-P2",
-                        "payload": {"kind": "block", "blocker_index": 0},
+                        "type": "state_update",
+                        "request_id": "state-3-P2",
+                        "payload": {
+                            "round_no": 3,
+                            "turn_serial": 5,
+                            "event_log_count": 2,
+                            "viewer_player_id": "P2",
+                            "turn_player_id": "P1",
+                            "players": {
+                                "P1": {
+                                    "life": 7,
+                                    "current_cp": 3,
+                                    "hand_count": 4,
+                                    "deck_count": 36,
+                                    "battlefield": [{"card_no": "1-0-004", "level": 1, "current_bp": 4000}],
+                                    "trigger_zone": [],
+                                },
+                                "P2": {
+                                    "life": 7,
+                                    "current_cp": 3,
+                                    "hand_count": 4,
+                                    "deck_count": 36,
+                                    "battlefield": [{"card_no": "1-0-031", "level": 1, "current_bp": 3000}],
+                                    "trigger_zone": [],
+                                },
+                            },
+                        },
                     },
                 },
             ],
@@ -340,7 +355,10 @@ class DemoMatchTest(unittest.TestCase):
                 "1-0-004": type("Card", (), {"name": "ランサー"})(),
                 "1-0-031": type("Card", (), {"name": "冥札再臨"})(),
             },
-            [],
+            [
+                {"round_no": 3, "player_id": "P1", "type": "attack_declared", "source_card_no": "1-0-004"},
+                {"round_no": 3, "player_id": "P2", "type": "block_declared", "source_card_no": "1-0-031"},
+            ],
             show_reqres=False,
         )
 

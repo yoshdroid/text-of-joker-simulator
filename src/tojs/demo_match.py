@@ -138,14 +138,7 @@ def _render_trace_log(
             details = _render_message_details(message, card_catalog)
             rendered.append(render_event_log(round_no, actor, direction, details))
 
-        action_event = _render_system_event_from_message(
-            round_no,
-            actor,
-            direction,
-            message,
-            card_catalog,
-            previous_shared_state,
-        )
+        action_event = _render_system_event_from_message(round_no, actor, direction, message, card_catalog)
         if action_event is not None:
             rendered.append(action_event)
 
@@ -221,12 +214,12 @@ def _render_action_message(message_type: str, payload: dict[str, Any], card_cata
         return f"{message_type} {card_name}をオーバーライド"
     if kind == "retreat" and card_name:
         return f"{message_type} {card_name}を撤退させる"
+    if kind == "use_intercept" and card_name:
+        return f"{message_type} {card_name}を使用"
     if kind == "attack":
         return f"{message_type} attack attacker_index={payload.get('attacker_index')}"
     if kind == "block":
         return f"{message_type} block blocker_index={payload.get('blocker_index')}"
-    if kind == "use_intercept" and card_name:
-        return f"{message_type} {card_name}を使用"
     return f"{message_type} {_format_choice(payload)}"
 
 
@@ -293,14 +286,11 @@ def _render_state_diff_events(
     if previous_state is None:
         return []
 
-    rendered: list[str] = []
     current_players = current_state.get("players", {})
     previous_players = previous_state.get("players", {})
     if not isinstance(current_players, dict) or not isinstance(previous_players, dict):
         return []
-
-    rendered.extend(_render_life_diff(round_no, previous_players, current_players))
-    return rendered
+    return _render_life_diff(round_no, previous_players, current_players)
 
 
 def _render_life_diff(
@@ -369,6 +359,9 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
     amount = event.get("amount")
     source_card_no = event.get("source_card_no")
     source_card_name = _lookup_card_name(source_card_no, card_catalog)
+    metadata = event.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
 
     if event_type == "turn_start_draw" and isinstance(amount, int):
         return f"{player_id}がターン開始時に{amount}枚ドロー"
@@ -376,6 +369,35 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
     if event_type == "turn_end":
         return f"{player_id}のターン終了"
+    if event_type == "attack_declared" and source_card_name:
+        return f"{player_id}が{source_card_name}でアタックを宣言"
+    if event_type == "block_declared" and source_card_name:
+        return f"{player_id}が{source_card_name}でブロックを宣言"
+    if event_type == "battle_bp_changed" and source_card_name and isinstance(amount, int):
+        current_damage = metadata.get("current_damage")
+        current_bp = metadata.get("current_bp")
+        if isinstance(current_damage, int) and isinstance(current_bp, int):
+            return f"{player_id}の{source_card_name}が{amount}ダメージを受けた (累積ダメージ {current_damage} / BP {current_bp})"
+        return f"{player_id}の{source_card_name}が{amount}ダメージを受けた"
+    if event_type == "battle_resolved":
+        result = metadata.get("result")
+        attacker_name = _lookup_card_name(metadata.get("attacker_card_no"), card_catalog)
+        blocker_name = _lookup_card_name(metadata.get("blocker_card_no"), card_catalog)
+        if result == "attacker_win" and attacker_name and blocker_name:
+            return f"戦闘結果: {attacker_name}が勝利し、{blocker_name}が敗北"
+        if result == "blocker_win" and attacker_name and blocker_name:
+            return f"戦闘結果: {blocker_name}が勝利し、{attacker_name}が敗北"
+        if result == "draw" and attacker_name and blocker_name:
+            return f"戦闘結果: {attacker_name}と{blocker_name}は相打ち"
+        return "戦闘結果が解決"
+    if event_type == "unit_sent_to_discard" and source_card_name:
+        return f"{player_id}の{source_card_name}が捨札へ移動"
+    if event_type == "unit_clock_up" and source_card_name:
+        from_level = metadata.get("from_level")
+        to_level = metadata.get("to_level")
+        if isinstance(from_level, int) and isinstance(to_level, int):
+            return f"{player_id}の{source_card_name}がクロックアップ Lv.{from_level} -> Lv.{to_level}"
+        return f"{player_id}の{source_card_name}がクロックアップ"
     if event_type == "trigger_used" and source_card_name:
         return f"{player_id}のトリガー {source_card_name} が発動"
     if event_type == "intercept_used" and source_card_name:
@@ -436,7 +458,6 @@ def _render_system_event_from_message(
     direction: str,
     message: dict[str, object],
     card_catalog: dict[str, Any],
-    shared_state: dict[str, Any] | None,
 ) -> str | None:
     if direction != "RES":
         return None
@@ -458,42 +479,7 @@ def _render_system_event_from_message(
         return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をオーバーライド")
     if kind == "retreat" and card_name:
         return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}を撤退させる")
-    if kind == "attack":
-        attacker_name = _lookup_battlefield_card_name(shared_state, actor, payload.get("attacker_index"), card_catalog)
-        if attacker_name:
-            return render_event_log(round_no, "SYS", "EVT", f"{actor}が{attacker_name}でアタックを宣言")
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}がアタックを宣言")
-    if kind == "block":
-        blocker_name = _lookup_battlefield_card_name(shared_state, actor, payload.get("blocker_index"), card_catalog)
-        if blocker_name:
-            return render_event_log(round_no, "SYS", "EVT", f"{actor}が{blocker_name}でブロックを宣言")
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}がブロックを宣言")
-    if kind == "use_intercept" and card_name:
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をインターセプト使用")
     return None
-
-
-def _lookup_battlefield_card_name(
-    shared_state: dict[str, Any] | None,
-    player_id: str,
-    unit_index: object,
-    card_catalog: dict[str, Any],
-) -> str | None:
-    if shared_state is None or not isinstance(unit_index, int):
-        return None
-    players = shared_state.get("players", {})
-    if not isinstance(players, dict):
-        return None
-    player_view = players.get(player_id, {})
-    if not isinstance(player_view, dict):
-        return None
-    battlefield = player_view.get("battlefield", [])
-    if not isinstance(battlefield, list) or unit_index < 0 or unit_index >= len(battlefield):
-        return None
-    unit = battlefield[unit_index]
-    if not isinstance(unit, dict):
-        return None
-    return _lookup_card_name(unit.get("card_no"), card_catalog)
 
 
 if __name__ == "__main__":

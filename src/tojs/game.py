@@ -60,6 +60,7 @@ class AbilityEvent:
     target_player_id: PlayerId | None = None
     source_card_no: str | None = None
     amount: int | None = None
+    metadata: dict[str, Any] | None = None
 
 
 def create_match_state(
@@ -793,6 +794,16 @@ def declare_attack_action(
     attacker.exhausted = True
     if attacker.unit_id == 0:
         attacker.unit_id = _allocate_unit_id(state)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="attack_declared",
+            player_id=player_id,
+            source_unit_id=attacker.unit_id,
+            target_player_id=get_opponent_id(player_id),
+            source_card_no=attacker.card_no,
+        ),
+    )
     resolve_ability_events(
         state,
         [
@@ -838,6 +849,16 @@ def resolve_declared_attack_action(
     if block_action is not None and block_action.get("kind") == "block":
         blocker_index = block_action["blocker_index"]
         blocker = defender.battlefield[blocker_index]
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="block_declared",
+                player_id=defender_id,
+                source_unit_id=blocker.unit_id,
+                target_player_id=player_id,
+                source_card_no=blocker.card_no,
+            ),
+        )
         resolve_ability_events(
             state,
             [
@@ -852,17 +873,70 @@ def resolve_declared_attack_action(
             choice_resolver,
         )
         blocker.exhausted = True
-        attacker.current_damage += get_unit_bp(state, blocker)
-        blocker.current_damage += get_unit_bp(state, attacker)
+        attacker_bp = get_unit_bp(state, attacker)
+        blocker_bp = get_unit_bp(state, blocker)
+        attacker.current_damage += blocker_bp
+        blocker.current_damage += attacker_bp
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="battle_bp_changed",
+                player_id=player_id,
+                source_unit_id=attacker.unit_id,
+                source_card_no=attacker.card_no,
+                amount=blocker_bp,
+                metadata={
+                    "current_damage": attacker.current_damage,
+                    "current_bp": get_unit_bp(state, attacker),
+                    "role": "attacker",
+                },
+            ),
+        )
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="battle_bp_changed",
+                player_id=defender_id,
+                source_unit_id=blocker.unit_id,
+                source_card_no=blocker.card_no,
+                amount=attacker_bp,
+                metadata={
+                    "current_damage": blocker.current_damage,
+                    "current_bp": get_unit_bp(state, blocker),
+                    "role": "blocker",
+                },
+            ),
+        )
         attacker_survives = attacker.current_damage < get_unit_bp(state, attacker)
         blocker_survives = blocker.current_damage < get_unit_bp(state, blocker)
         if _unit_has_ability(state, attacker, "貫通") and attacker_survives and not blocker_survives:
             defender.life -= 1
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="battle_resolved",
+                player_id=player_id,
+                source_unit_id=attacker.unit_id,
+                target_player_id=defender_id,
+                source_card_no=attacker.card_no,
+                metadata={
+                    "result": (
+                        "attacker_win"
+                        if attacker_survives and not blocker_survives
+                        else "blocker_win"
+                        if blocker_survives and not attacker_survives
+                        else "draw"
+                    ),
+                    "attacker_card_no": attacker.card_no,
+                    "blocker_card_no": blocker.card_no,
+                },
+            ),
+        )
         emitted_events: list[AbilityEvent] = []
         if attacker_survives and not blocker_survives:
-            emitted_events.extend(_clock_up_unit(player_id, attacker))
+            emitted_events.extend(_clock_up_unit(state, player_id, attacker))
         elif blocker_survives and not attacker_survives:
-            emitted_events.extend(_clock_up_unit(defender_id, blocker))
+            emitted_events.extend(_clock_up_unit(state, defender_id, blocker))
         if emitted_events:
             resolve_ability_events(state, emitted_events, rng, choice_resolver)
         _destroy_broken_units(state, player_id, rng, choice_resolver)
@@ -973,6 +1047,7 @@ def _record_ability_event(state: MatchState, event: AbilityEvent) -> None:
             "source_unit_id": event.source_unit_id,
             "source_card_no": event.source_card_no,
             "amount": event.amount,
+            "metadata": dict(event.metadata) if isinstance(event.metadata, dict) else None,
         }
     )
     state.next_event_no += 1
@@ -1111,11 +1186,22 @@ def get_unit_bp(state: MatchState, unit: UnitState) -> int:
     )
 
 
-def _clock_up_unit(player_id: PlayerId, unit: UnitState) -> list[AbilityEvent]:
+def _clock_up_unit(state: MatchState, player_id: PlayerId, unit: UnitState) -> list[AbilityEvent]:
     if unit.level >= 3:
         return []
+    previous_level = unit.level
     unit.level += 1
     unit.current_damage = 0
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_clock_up",
+            player_id=player_id,
+            source_unit_id=unit.unit_id,
+            source_card_no=unit.card_no,
+            metadata={"from_level": previous_level, "to_level": unit.level},
+        ),
+    )
     emitted: list[AbilityEvent] = []
     if unit.level >= 3:
         unit.exhausted = False
@@ -1309,6 +1395,37 @@ def _draw_cards_by_category(
     actual_matches = matches[: max(0, state.regulation.hand_size_limit - len(player.hand))]
     player.hand.extend(actual_matches)
     return len(actual_matches)
+
+
+def _draw_random_cards_by_category(
+    state: MatchState,
+    player_id: PlayerId,
+    category: str,
+    count: int,
+    rng: random.Random,
+) -> int:
+    player = state.players[player_id]
+    if count <= 0 or len(player.hand) >= state.regulation.hand_size_limit:
+        return 0
+
+    matching_indexes = [
+        index for index, card_no in enumerate(player.draw_pile) if state.card_catalog[card_no].category == category
+    ]
+    actual_count = min(count, len(matching_indexes), state.regulation.hand_size_limit - len(player.hand))
+    if actual_count <= 0:
+        return 0
+
+    selected_indexes = set(rng.sample(matching_indexes, actual_count))
+    drawn_cards: list[str] = []
+    remaining_cards: list[str] = []
+    for index, card_no in enumerate(player.draw_pile):
+        if index in selected_indexes:
+            drawn_cards.append(card_no)
+        else:
+            remaining_cards.append(card_no)
+    player.draw_pile = remaining_cards
+    player.hand.extend(drawn_cards)
+    return len(drawn_cards)
 
 
 def _count_drawable_cards_by_category(state: MatchState, player_id: PlayerId, category: str) -> int:
@@ -2024,8 +2141,18 @@ def _resolve_intercept_draw_on_destroy(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    _draw_cards_by_category(state, event.player_id, "intercept", 1)
-    return []
+    drawn = _draw_random_cards_by_category(state, event.player_id, "intercept", 1, rng)
+    if drawn <= 0:
+        return []
+    return [
+        AbilityEvent(
+            type="cards_drawn",
+            player_id=event.player_id,
+            target_player_id=event.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=drawn,
+        )
+    ]
 
 
 def _build_unavailable_intercept_choice(card: CardDefinition, trigger_index: int, reason: str) -> dict[str, Any]:
@@ -2129,6 +2256,16 @@ def _destroy_unit_by_index(
         return
     target = player.battlefield.pop(target_index)
     player.discard_pile.insert(0, target.card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_sent_to_discard",
+            player_id=player_id,
+            source_unit_id=target.unit_id,
+            source_card_no=target.card_no,
+            metadata={"reason": "effect"},
+        ),
+    )
     resolve_ability_events(
         state,
         [
@@ -2269,6 +2406,16 @@ def _destroy_broken_units(
     for unit in player.battlefield:
         if unit.current_damage >= get_unit_bp(state, unit):
             player.discard_pile.insert(0, unit.card_no)
+            _record_ability_event(
+                state,
+                AbilityEvent(
+                    type="unit_sent_to_discard",
+                    player_id=player_id,
+                    source_unit_id=unit.unit_id,
+                    source_card_no=unit.card_no,
+                    metadata={"reason": "battle"},
+                ),
+            )
             destroyed_units.append(unit)
         else:
             survivors.append(unit)
