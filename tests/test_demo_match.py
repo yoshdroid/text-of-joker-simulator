@@ -169,12 +169,18 @@ class DemoMatchTest(unittest.TestCase):
             {},
             [
                 {"round_no": 2, "player_id": "P1", "type": "turn_start_draw", "amount": 2},
-                {"round_no": 2, "player_id": "P1", "type": "turn_start_cp_set", "amount": 1},
+                {
+                    "round_no": 2,
+                    "player_id": "P1",
+                    "type": "turn_start_cp_set",
+                    "amount": 1,
+                    "metadata": {"before_cp": 2, "after_cp": 3},
+                },
             ],
         )
 
         self.assertIn("ターン開始時に2枚ドロー", rendered[0])
-        self.assertIn("ターン開始時にCPを変動 +1", rendered[1])
+        self.assertIn("ターン開始時にCPを変動 2 -> 3", rendered[1])
         self.assertIn("[REQ] state_update", rendered[2])
         self.assertTrue(rendered[0].startswith("[R02][E001] "))
         self.assertTrue(rendered[1].startswith("[R02][E002] "))
@@ -448,6 +454,27 @@ class DemoMatchTest(unittest.TestCase):
 
         self.assertTrue(any("不可侵防壁の効果でランサーのBPが+3000" in line for line in rendered))
         self.assertTrue(any("現BP 7000" in line for line in rendered))
+
+    def test_render_trace_log_renders_drive_cp_cost_without_effect_wording(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-004": type("Card", (), {"name": "ランサー"})(),
+            },
+            [
+                {
+                    "round_no": 2,
+                    "player_id": "P1",
+                    "type": "cp_changed",
+                    "source_card_no": "1-0-004",
+                    "amount": -2,
+                    "metadata": {"reason": "unit_drive", "before_cp": 2, "after_cp": 0},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R02][E001] ユニットドライブでP1のCPが-2 (2 -> 0)"])
 
     def test_render_trace_log_renders_trigger_and_intercept_with_card_names(self) -> None:
         rendered = _render_trace_log(

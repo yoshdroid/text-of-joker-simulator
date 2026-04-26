@@ -361,6 +361,10 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
     if event_type == "turn_start_draw" and isinstance(amount, int):
         return f"{player_id}がターン開始時に{amount}枚ドロー{drawn_suffix}"
     if event_type == "turn_start_cp_set" and isinstance(amount, int):
+        before_cp = metadata.get("before_cp") if isinstance(metadata, dict) else None
+        after_cp = metadata.get("after_cp") if isinstance(metadata, dict) else None
+        if isinstance(before_cp, int) and isinstance(after_cp, int):
+            return f"{player_id}がターン開始時にCPを変動 {before_cp} -> {after_cp}"
         return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
     if event_type == "turn_end":
         return f"{player_id}のターン終了"
@@ -482,9 +486,19 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
             return f"{source_card_name}の効果で{player_id}が{amount}枚ドロー{drawn_suffix}"
         return f"{player_id}が{amount}枚ドロー{drawn_suffix}"
     if event_type == "cp_changed" and isinstance(amount, int):
+        reason = metadata.get("reason") if isinstance(metadata, dict) else None
+        before_cp = metadata.get("before_cp") if isinstance(metadata, dict) else None
+        after_cp = metadata.get("after_cp") if isinstance(metadata, dict) else None
+        cp_change_suffix = ""
+        if isinstance(before_cp, int) and isinstance(after_cp, int):
+            cp_change_suffix = f" ({before_cp} -> {after_cp})"
+        if reason == "unit_drive":
+            return f"ユニットドライブで{player_id}のCPが{amount:+d}{cp_change_suffix}"
+        if reason == "overdrive":
+            return f"オーバードライブで{player_id}のCPが{amount:+d}{cp_change_suffix}"
         if source_card_name:
-            return f"{source_card_name}の効果で{player_id}のCPが{amount:+d}"
-        return f"{player_id}のCPが{amount:+d}"
+            return f"{source_card_name}の効果で{player_id}のCPが{amount:+d}{cp_change_suffix}"
+        return f"{player_id}のCPが{amount:+d}{cp_change_suffix}"
     if event_type == "life_changed" and isinstance(amount, int):
         subject = str(target_player_id) if isinstance(target_player_id, str) else player_id
         current_life = metadata.get("current_life") if isinstance(metadata, dict) else None

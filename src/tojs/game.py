@@ -138,6 +138,7 @@ def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> No
                 type="turn_start_cp_set",
                 player_id=player_id,
                 amount=player.current_cp - previous_cp,
+                metadata={"before_cp": previous_cp, "after_cp": player.current_cp},
             ),
         ],
         rng,
@@ -614,6 +615,7 @@ def apply_drive_action(
     player.current_cp -= drive_cost
     player.hand.pop(hand_index)
     if drive_cost > 0:
+        current_cp = player.current_cp
         _record_ability_event(
             state,
             AbilityEvent(
@@ -622,6 +624,11 @@ def apply_drive_action(
                 target_player_id=player_id,
                 source_card_no=card_no,
                 amount=-drive_cost,
+                metadata={
+                    "reason": "unit_drive",
+                    "before_cp": current_cp + drive_cost,
+                    "after_cp": current_cp,
+                },
             ),
         )
     if reducer_index is not None:
@@ -710,6 +717,7 @@ def apply_overdrive_action(
     player.current_cp -= overdrive_cost
     player.hand.pop(hand_index)
     if overdrive_cost > 0:
+        current_cp = player.current_cp
         _record_ability_event(
             state,
             AbilityEvent(
@@ -718,6 +726,11 @@ def apply_overdrive_action(
                 target_player_id=player_id,
                 source_card_no=card_no,
                 amount=-overdrive_cost,
+                metadata={
+                    "reason": "overdrive",
+                    "before_cp": current_cp + overdrive_cost,
+                    "after_cp": current_cp,
+                },
             ),
         )
     if reducer_index is not None:
@@ -2399,6 +2412,7 @@ def _resolve_charge_enter(
             target_player_id=event.player_id,
             source_card_no=triggered_ability["card_no"],
             amount=gained,
+            metadata={"before_cp": previous_cp, "after_cp": player.current_cp},
         )
     ]
 
