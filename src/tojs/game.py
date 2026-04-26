@@ -761,16 +761,17 @@ def apply_overdrive_action(
             metadata={"base_card_no": target_card.card_no, "from_level": previous_level, "to_level": evolved_level},
         ),
     )
-    _record_ability_event(
-        state,
-        AbilityEvent(
-            type="unit_level_changed",
-            player_id=player_id,
-            source_unit_id=player.battlefield[target_index].unit_id,
-            source_card_no=card_no,
-            metadata={"from_level": previous_level, "to_level": evolved_level, "reason": "overdrive"},
-        ),
-    )
+    if previous_level != evolved_level:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_level_changed",
+                player_id=player_id,
+                source_unit_id=player.battlefield[target_index].unit_id,
+                source_card_no=card_no,
+                metadata={"from_level": previous_level, "to_level": evolved_level, "reason": "overdrive"},
+            ),
+        )
     emitted_events = [
         AbilityEvent(
             type="unit_entered",
@@ -2816,7 +2817,14 @@ def _set_match_outcome(state: MatchState, winner: str, reason: str) -> None:
             type="match_ended",
             player_id=winner if winner in {"P1", "P2"} else "P1",
             target_player_id=winner if winner in {"P1", "P2", "draw"} else None,
-            metadata={"winner": winner, "reason": reason},
+            metadata={
+                "winner": winner,
+                "reason": reason,
+                "final_life": {
+                    "P1": state.players["P1"].life,
+                    "P2": state.players["P2"].life,
+                },
+            },
         ),
     )
 

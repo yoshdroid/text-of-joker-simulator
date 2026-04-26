@@ -496,10 +496,17 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         return f"{subject}のライフが{amount:+d}"
     if event_type == "match_ended" and isinstance(metadata, dict):
         winner = metadata.get("winner")
+        final_life = metadata.get("final_life")
+        life_suffix = ""
+        if isinstance(final_life, dict):
+            p1_life = final_life.get("P1")
+            p2_life = final_life.get("P2")
+            if isinstance(p1_life, int) and isinstance(p2_life, int):
+                life_suffix = f" (P1 LIFE {p1_life} / P2 LIFE {p2_life})"
         if winner == "draw":
-            return "引き分け"
+            return f"引き分け{life_suffix}"
         if isinstance(winner, str):
-            return f"{winner}の勝利"
+            return f"{winner}の勝利{life_suffix}"
     return None
 
 

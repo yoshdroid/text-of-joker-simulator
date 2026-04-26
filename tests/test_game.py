@@ -1074,7 +1074,7 @@ class GameStateTest(unittest.TestCase):
         self.assertTrue(state.players["P1"].battlefield[0].exhausted)
         self.assertFalse(state.players["P1"].battlefield[0].attack_restricted)
 
-    # overdrive では素材の捨札移動とレベル変化を含むイベントが記録されることを確認する。
+    # overdrive では素材の捨札移動とオーバードライブイベントが記録されることを確認する。
     def test_apply_overdrive_action_records_events(self) -> None:
         state = self.create_state()
         start_turn(state, "P1", random.Random(7))
@@ -1091,9 +1091,39 @@ class GameStateTest(unittest.TestCase):
         self.assertIn("cp_changed", event_types)
         self.assertIn("unit_sent_to_discard", event_types)
         self.assertIn("unit_overdriven", event_types)
-        self.assertIn("unit_level_changed", event_types)
+        self.assertNotIn("unit_level_changed", event_types)
         self.assertEqual(state.players["P1"].battlefield[0].current_damage, 0)
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
+
+    # overdrive でレベルが変わる時だけ unit_level_changed が記録されることを確認する。
+    def test_apply_overdrive_action_records_level_change_only_when_changed(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].current_cp = 2
+        state.players["P1"].hand = ["1-0-101@L3"]
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=5, level=1, exhausted=True, attack_restricted=True, current_damage=2)
+        ]
+
+        apply_action(
+            state,
+            "P1",
+            {
+                "kind": "overdrive",
+                "hand_index": 0,
+                "card_no": "1-0-101@L3",
+                "target_index": 0,
+                "cost": 2,
+                "trigger_reducer_index": None,
+                "card_level": 3,
+            },
+            random.Random(7),
+        )
+
+        level_event = next(event for event in state.event_log if event["type"] == "unit_level_changed")
+        self.assertEqual(level_event["metadata"]["from_level"], 1)
+        self.assertEqual(level_event["metadata"]["to_level"], 3)
+        self.assertEqual(level_event["metadata"]["reason"], "overdrive")
 
     # Lv.3 evolution を overdrive した時は OC 効果で行動権が回復することを確認する。
     def test_apply_overdrive_action_recovers_exhaustion_for_level_three(self) -> None:
@@ -1193,6 +1223,7 @@ class GameStateTest(unittest.TestCase):
                 event["type"] == "match_ended"
                 and event.get("metadata", {}).get("winner") == "P1"
                 and event.get("metadata", {}).get("reason") == "life_zero"
+                and event.get("metadata", {}).get("final_life") == {"P1": 7, "P2": 0}
                 for event in state.event_log
             )
         )
@@ -1215,6 +1246,7 @@ class GameStateTest(unittest.TestCase):
                 event["type"] == "match_ended"
                 and event.get("metadata", {}).get("winner") == "P1"
                 and event.get("metadata", {}).get("reason") == "round_limit"
+                and event.get("metadata", {}).get("final_life") == {"P1": 5, "P2": 3}
                 for event in state.event_log
             )
         )

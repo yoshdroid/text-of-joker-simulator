@@ -562,13 +562,32 @@ class DemoMatchTest(unittest.TestCase):
                     "round_no": 4,
                     "player_id": "P1",
                     "type": "match_ended",
-                    "metadata": {"winner": "P1", "reason": "life_zero"},
+                    "metadata": {"winner": "P1", "reason": "life_zero", "final_life": {"P1": 7, "P2": 0}},
                 }
             ],
             show_reqres=False,
         )
 
-        self.assertEqual(rendered, ["[R04][E001] P1の勝利"])
+        self.assertEqual(rendered, ["[R04][E001] P1の勝利 (P1 LIFE 7 / P2 LIFE 0)"])
+
+    def test_render_trace_log_does_not_render_noop_overdrive_level_change(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-039": type("Card", (), {"name": "冥王ハデス"})(),
+            },
+            [
+                {
+                    "round_no": 7,
+                    "player_id": "P2",
+                    "type": "unit_overdriven",
+                    "source_card_no": "1-0-039",
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R07][E001] P2が冥王ハデスでオーバードライブ"])
 
 
 if __name__ == "__main__":
