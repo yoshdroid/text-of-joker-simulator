@@ -13,6 +13,7 @@ from tojs.game import (
     build_reactive_intercept_choice_payload,
     build_state_update_payload,
     create_match_state,
+    get_event_definition,
     list_available_block_actions,
     list_available_intercept_actions,
     list_available_actions,
@@ -215,6 +216,19 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P2"].hand), 4)
         self.assertEqual(len(state.players["P1"].draw_pile), 36)
         self.assertEqual(len(state.players["P2"].draw_pile), 36)
+
+    # イベント定義表から、登場時と破壊時の能力収集モードを読み取れることを確認する。
+    def test_event_definitions_describe_collection_modes(self) -> None:
+        unit_entered = get_event_definition("unit_entered")
+        unit_destroyed = get_event_definition("unit_destroyed")
+
+        self.assertEqual(unit_entered.collection_mode, "priority")
+        self.assertTrue(unit_entered.collect_unit_abilities)
+        self.assertTrue(unit_entered.collect_trigger_abilities)
+        self.assertTrue(unit_entered.unit_ability_source_only)
+
+        self.assertEqual(unit_destroyed.collection_mode, "destroyed_source")
+        self.assertEqual(unit_destroyed.source_zone, "graveyard")
 
     # 必要ドロー枚数がデッキ残枚数を上回る場合は、残りデッキを先に引かず、捨札を混ぜた新デッキから引くことを確認する
     def test_draw_rebuilds_deck_before_drawing(self) -> None:
@@ -573,6 +587,22 @@ class GameStateTest(unittest.TestCase):
             if event["type"] == "cards_drawn" and event["source_card_no"] == "1-0-040"
         )
         self.assertEqual(draw_event["metadata"]["drawn_card_nos"], ["1-0-003"])
+
+    # ユニット能力が発動した時、能力名つきの ability_triggered イベントが記録されることを確認する。
+    def test_unit_ability_trigger_records_ability_name(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].hand = ["1-0-040"]
+        state.players["P1"].draw_pile = ["1-0-003"] + state.players["P1"].draw_pile
+        state.players["P1"].current_cp = 1
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        trigger_event = next(event for event in state.event_log if event["type"] == "ability_triggered")
+        self.assertEqual(trigger_event["player_id"], "P1")
+        self.assertEqual(trigger_event["source_card_no"], "1-0-040")
+        self.assertEqual(trigger_event["metadata"]["ability_name"], "ハッパロイド")
 
     # 何でも屋の陳列台を trigger_zone に置いた時、自分のユニット登場で 1 枚ドローすることを確認する。
     def test_trigger_zone_field_enter_ability_draws_card(self) -> None:
@@ -2158,6 +2188,39 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(cp_event["metadata"]["reason"], "reactive_intercept_use")
         self.assertEqual(cp_event["metadata"]["before_cp"], 1)
         self.assertEqual(cp_event["metadata"]["after_cp"], 0)
+
+    # ムーンセイヴァーは自分が攻撃した時だけ使え、相手の攻撃では使えないことを確認する。
+    def test_reactive_intercept_moon_saver_is_attacker_only(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-089"] = CardDefinition(
+            card_no="1-0-089",
+            category="intercept",
+            rarity="R",
+            color="blue",
+            name="Moon Saver",
+            cp=1,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="ムーンセイヴァー", text=""),),
+            race="test",
+        )
+        state.players["P1"].trigger_zone = ["1-0-089"]
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-031", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].current_cp = 1
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-002", unit_id=3, level=2, exhausted=False, attack_restricted=False)
+        ]
+
+        payload = build_reactive_intercept_choice_payload(
+            state,
+            "P1",
+            AbilityEvent(type="unit_attacked", player_id="P2", source_unit_id=3, target_player_id="P1"),
+        )
+
+        self.assertEqual(payload["available_choices"][0]["kind"], "no_intercept")
+        self.assertEqual(payload["unavailable_choices"][0]["card_no"], "1-0-089")
+        self.assertEqual(payload["unavailable_choices"][0]["disabled_reason"], "attacker_only")
 
     # ダーク・アーマーは自ユニットにBP+7000し、自分のライフを1減らすことを確認する。
     def test_battle_intercept_dark_armor_adds_bp_and_costs_life(self) -> None:

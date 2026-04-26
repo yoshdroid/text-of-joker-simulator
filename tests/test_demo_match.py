@@ -745,5 +745,26 @@ class DemoMatchTest(unittest.TestCase):
         self.assertEqual(rendered, ["[R07][E001] P2が冥王ハデスでオーバードライブ"])
 
 
+    def test_render_trace_log_renders_unit_ability_trigger(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-040": type("Card", (), {"name": "ハッパロイド"})(),
+            },
+            [
+                {
+                    "round_no": 2,
+                    "player_id": "P2",
+                    "type": "ability_triggered",
+                    "source_card_no": "1-0-040",
+                    "metadata": {"ability_name": "ハッパロイド"},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R02][E001] P2のハッパロイドの能力【ハッパロイド】が発動"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -297,6 +297,23 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
     metadata = event.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
+    if event_type == "ability_triggered" and source_card_name:
+        ability_name = metadata.get("ability_name")
+        if isinstance(ability_name, str) and ability_name:
+            return f"{player_id}の{source_card_name}の能力【{ability_name}】が発動"
+        return f"{player_id}の{source_card_name}の能力が発動"
+    if (
+        event_type == "card_moved"
+        and metadata.get("from_zone") == "trigger_zone"
+        and metadata.get("to_zone") == "discard"
+        and metadata.get("reason") == "trigger_resolution"
+    ):
+        return None
+    if event_type == "ability_triggered" and source_card_name:
+        ability_name = metadata.get("ability_name")
+        if isinstance(ability_name, str) and ability_name:
+            return f"{player_id}の{source_card_name}の能力『{ability_name}』が発動"
+        return f"{player_id}の{source_card_name}の能力が発動"
     drawn_card_names = _lookup_card_names(metadata.get("drawn_card_nos"), card_catalog)
     drawn_suffix = f" ({' / '.join(drawn_card_names)})" if drawn_card_names else ""
 

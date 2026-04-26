@@ -67,6 +67,9 @@ class AbilityEvent:
 class EventDefinition:
     type: str
     collection_mode: str = "source_only"
+    source_zone: str = "battlefield"
+    collect_unit_abilities: bool = True
+    collect_trigger_abilities: bool = False
     source_side_only: bool = False
     unit_ability_source_only: bool = False
     source_first_turn_player: bool = False
@@ -76,13 +79,30 @@ class EventDefinition:
 
 
 EVENT_DEFINITIONS: list[EventDefinition] = [
-    EventDefinition(type="turn_started", collection_mode="priority"),
-    EventDefinition(type="turn_start_draw", collection_mode="priority"),
-    EventDefinition(type="turn_start_cp_set", collection_mode="priority"),
-    EventDefinition(type="turn_end", collection_mode="priority"),
+    EventDefinition(
+        type="turn_started",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
+    EventDefinition(
+        type="turn_start_draw",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
+    EventDefinition(
+        type="turn_start_cp_set",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
+    EventDefinition(
+        type="turn_end",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
     EventDefinition(
         type="unit_entered",
         collection_mode="priority",
+        collect_trigger_abilities=True,
         source_side_only=True,
         unit_ability_source_only=True,
         source_first_turn_player=True,
@@ -91,6 +111,7 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
     EventDefinition(
         type="unit_attacked",
         collection_mode="priority",
+        collect_trigger_abilities=True,
         source_side_only=True,
         unit_ability_source_only=True,
         source_first_turn_player=True,
@@ -99,6 +120,7 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
     EventDefinition(
         type="battle_started",
         collection_mode="priority",
+        collect_trigger_abilities=True,
         unit_ability_source_only=True,
         source_first_turn_player=True,
         source_first_non_turn_metadata_key="blocker_unit_id",
@@ -107,17 +129,32 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
     EventDefinition(
         type="player_attack_success",
         collection_mode="priority",
+        collect_trigger_abilities=True,
         source_side_only=True,
         unit_ability_source_only=True,
     ),
     EventDefinition(
         type="unit_destroyed",
+        collection_mode="destroyed_source",
+        source_zone="graveyard",
         reactive_intercept_window=True,
     ),
     EventDefinition(type="unit_overclocked"),
-    EventDefinition(type="cards_drawn", collection_mode="priority"),
-    EventDefinition(type="cp_changed", collection_mode="priority"),
-    EventDefinition(type="life_changed", collection_mode="priority"),
+    EventDefinition(
+        type="cards_drawn",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
+    EventDefinition(
+        type="cp_changed",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
+    EventDefinition(
+        type="life_changed",
+        collection_mode="priority",
+        collect_trigger_abilities=True,
+    ),
 ]
 
 
@@ -1342,15 +1379,21 @@ def resolve_ability_events(
         event = pending_events.pop(0)
         _record_ability_event(state, event)
         next_events = _resolve_system_event(state, event, rng)
+        deferred_events: list[AbilityEvent] = []
         triggered = collect_triggered_abilities(state, event)
         for triggered_ability in triggered:
             emitted = resolve_triggered_ability(state, event, triggered_ability, rng, choice_resolver)
-            next_events.extend(emitted)
+            immediate_emitted = [emitted_event for emitted_event in emitted if emitted_event.type != "unit_overclocked"]
+            deferred_events.extend(
+                emitted_event for emitted_event in emitted if emitted_event.type == "unit_overclocked"
+            )
+            if immediate_emitted:
+                resolve_ability_events(state, immediate_emitted, rng, choice_resolver)
         if _supports_priority_reactive_intercepts(event):
             _resolve_priority_reactive_intercepts(state, event, rng, choice_resolver)
         if _supports_priority_battle_intercepts(event):
             _resolve_priority_battle_intercepts(state, event, choice_resolver)
-        deferred_events = [next_event for next_event in next_events if next_event.type == "unit_overclocked"]
+        deferred_events.extend(next_event for next_event in next_events if next_event.type == "unit_overclocked")
         immediate_events = [next_event for next_event in next_events if next_event.type != "unit_overclocked"]
         pending_events = immediate_events + pending_events + deferred_events
 
@@ -1432,10 +1475,10 @@ def _ability_owner_id(event: AbilityEvent, triggered_ability: dict[str, Any]) ->
 
 def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
     definition = get_event_definition(event.type)
-    if event.type == "unit_destroyed" and event.source_card_no is not None:
-        return _collect_destroyed_triggered_abilities(state, event)
     if definition.collection_mode == "priority":
         return _collect_priority_triggered_abilities(state, event)
+    if definition.collection_mode == "destroyed_source":
+        return _collect_source_card_triggered_abilities(state, event, definition.source_zone)
     return _collect_source_only_triggered_abilities(state, event)
 
 
@@ -1460,27 +1503,107 @@ def _collect_source_only_triggered_abilities(state: MatchState, event: AbilityEv
     return triggered
 
 
-def _collect_destroyed_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+ABILITY_NAME_OVERRIDES: dict[tuple[str, str], str] = {
+    ("1-0-002", "unit_attacked"): "ソードファイター",
+    ("1-0-004", "unit_attacked"): "ダメージブレイク",
+    ("1-0-007", "unit_overclocked"): "悪の覚醒",
+    ("1-0-010", "unit_attacked"): "不知火伍式",
+    ("1-0-010", "player_attack_success"): "不知火伍式",
+    ("1-0-012", "unit_entered"): "魔槍のリリム",
+    ("1-0-012", "unit_attacked"): "魔槍のリリム",
+    ("1-0-027", "unit_destroyed"): "ロスト",
+    ("1-0-029", "unit_destroyed"): "インターセプトドロー",
+    ("1-0-031", "unit_overclocked"): "リバイブ",
+    ("1-0-033", "unit_entered"): "リバイブ",
+    ("1-0-039", "unit_entered"): "冥王ハデス",
+    ("1-0-040", "unit_entered"): "ハッパロイド",
+    ("1-0-043", "unit_entered"): "チャージ / 連撃・グラインドドロー",
+    ("1-0-044", "turn_end"): "不屈",
+    ("1-0-045", "battle_started"): "ブロッカー",
+    ("1-0-048", "turn_end"): "不屈",
+    ("1-0-051", "unit_entered"): "バルバトス",
+}
+
+
+def _record_unit_ability_trigger_event(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    owner_id: PlayerId,
+) -> None:
+    card_no = triggered_ability["card_no"]
+    card = state.card_catalog[card_no]
+    if card.category not in {"unit", "evolution"}:
+        return
+    ability_name = _get_triggered_ability_name(state, card_no, event.type, triggered_ability)
+    if not ability_name:
+        return
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="ability_triggered",
+            player_id=owner_id,
+            source_unit_id=triggered_ability.get("source_unit_id"),
+            source_card_no=card_no,
+            metadata={
+                "ability_name": ability_name,
+                "event_type": event.type,
+                "source_zone": triggered_ability.get("source_zone"),
+            },
+        ),
+    )
+
+
+def _get_triggered_ability_name(
+    state: MatchState,
+    card_no: str,
+    event_type: str,
+    triggered_ability: dict[str, Any],
+) -> str | None:
+    keyword_name = triggered_ability.get("keyword_name")
+    if isinstance(keyword_name, str):
+        return keyword_name
+    card = state.card_catalog[card_no]
+    if len(card.abilities) == 1:
+        return card.abilities[0].name
+    overridden = ABILITY_NAME_OVERRIDES.get((card_no, event_type))
+    if overridden is not None:
+        return overridden
+    if card.abilities:
+        return " / ".join(ability.name for ability in card.abilities)
+    return card.name
+
+
+def _collect_source_card_triggered_abilities(
+    state: MatchState,
+    event: AbilityEvent,
+    source_zone: str,
+) -> list[dict[str, Any]]:
+    if event.source_card_no is None:
+        return []
     return _build_triggered_abilities_for_card(
         state,
         event.source_card_no,
         event.type,
         event.player_id,
-        "graveyard",
+        source_zone,
         source_unit_id=event.source_unit_id,
     )
 
 
 def _collect_priority_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    definition = get_event_definition(event.type)
     turn_player_id = state.turn_player_id
     non_turn_player_id = get_opponent_id(turn_player_id)
-    turn_unit = _collect_priority_unit_abilities_for_side(state, event, turn_player_id)
-    non_turn_unit = _collect_priority_unit_abilities_for_side(state, event, non_turn_player_id)
-    turn_trigger = _collect_priority_trigger_abilities_for_side(state, event, turn_player_id)
-    non_turn_trigger = _collect_priority_trigger_abilities_for_side(state, event, non_turn_player_id)
     triggered: list[dict[str, Any]] = []
-    triggered.extend(_interleave_priority_bands(turn_unit, non_turn_unit))
-    triggered.extend(_interleave_priority_bands(turn_trigger, non_turn_trigger))
+    if definition.collect_unit_abilities:
+        turn_unit = _collect_priority_unit_abilities_for_side(state, event, turn_player_id)
+        non_turn_unit = _collect_priority_unit_abilities_for_side(state, event, non_turn_player_id)
+        triggered.extend(_interleave_priority_bands(turn_unit, non_turn_unit))
+    if definition.collect_trigger_abilities:
+        turn_trigger = _collect_priority_trigger_abilities_for_side(state, event, turn_player_id)
+        non_turn_trigger = _collect_priority_trigger_abilities_for_side(state, event, non_turn_player_id)
+        triggered.extend(_interleave_priority_bands(turn_trigger, non_turn_trigger))
     return triggered
 
 
@@ -1605,14 +1728,14 @@ def _resolve_priority_reactive_intercepts(
     order_index = 0
     while pass_count < 2 and state.winner is None:
         player_id = player_order[order_index % 2]
-        payload = build_reactive_intercept_choice_payload(state, player_id, event.type)
+        payload = build_reactive_intercept_choice_payload(state, player_id, event)
         available_choices = payload.get("available_choices", [])
         if not any(choice.get("kind") == "use_intercept" for choice in available_choices):
             pass_count += 1
             order_index += 1
             continue
         chosen_action = _request_choice(player_id, payload, choice_resolver)
-        apply_reactive_intercept_action(state, player_id, chosen_action, event.type, rng, choice_resolver)
+        apply_reactive_intercept_action(state, player_id, chosen_action, event, rng, choice_resolver)
         if chosen_action.get("kind") == "use_intercept":
             pass_count = 0
         else:
@@ -1653,6 +1776,8 @@ def resolve_triggered_ability(
         triggered_ability["card_no"],
         event.type,
     )
+    owner_id = _ability_owner_id(event, triggered_ability)
+    _record_unit_ability_trigger_event(state, event, triggered_ability, owner_id)
     keyword_name = triggered_ability.get("keyword_name")
     if keyword_name == "不屈":
         return _resolve_untiring(state, event, triggered_ability, rng, choice_resolver)
@@ -2313,8 +2438,9 @@ def _resolve_intercept_effect(
 def build_reactive_intercept_choice_payload(
     state: MatchState,
     player_id: PlayerId,
-    event_type: str,
+    event_or_type: AbilityEvent | str,
 ) -> dict[str, Any]:
+    event_type, event_player_id = _normalize_reactive_intercept_event(event_or_type)
     player = state.players[player_id]
     actions: list[dict[str, Any]] = [
         {
@@ -2331,6 +2457,9 @@ def build_reactive_intercept_choice_payload(
         if card.category != "intercept":
             continue
         if not _supports_reactive_intercept_event(card_no, event_type):
+            continue
+        if _get_reactive_intercept_disabled_reason(card_no, event_type, player_id, event_player_id) == "attacker_only":
+            unavailable_choices.append(_build_unavailable_intercept_choice(card, trigger_index, "attacker_only"))
             continue
         if (card.cp or 0) > player.current_cp:
             unavailable_choices.append(_build_unavailable_intercept_choice(card, trigger_index, "not_enough_cp"))
@@ -2358,16 +2487,34 @@ def build_reactive_intercept_choice_payload(
     }
 
 
+def _normalize_reactive_intercept_event(event_or_type: AbilityEvent | str) -> tuple[str, PlayerId | None]:
+    if isinstance(event_or_type, AbilityEvent):
+        return event_or_type.type, event_or_type.player_id
+    return event_or_type, None
+
+
+def _get_reactive_intercept_disabled_reason(
+    card_no: str,
+    event_type: str,
+    player_id: PlayerId,
+    event_player_id: PlayerId | None,
+) -> str | None:
+    if card_no == "1-0-089" and event_type == "unit_attacked" and event_player_id is not None and player_id != event_player_id:
+        return "attacker_only"
+    return None
+
+
 def apply_reactive_intercept_action(
     state: MatchState,
     player_id: PlayerId,
     action: dict[str, Any],
-    event_type: str,
+    event_or_type: AbilityEvent | str,
     rng: random.Random | None = None,
     choice_resolver: ChoiceResolver | None = None,
 ) -> None:
     if action.get("kind") != "use_intercept":
         return
+    event_type, event_player_id = _normalize_reactive_intercept_event(event_or_type)
     if rng is None:
         rng = random.Random(0)
     player = state.players[player_id]
@@ -2377,6 +2524,9 @@ def apply_reactive_intercept_action(
     card_no = player.trigger_zone[trigger_index]
     if not _supports_reactive_intercept_event(card_no, event_type):
         raise ValueError(f"intercept does not support event: {card_no} {event_type}")
+    disabled_reason = _get_reactive_intercept_disabled_reason(card_no, event_type, player_id, event_player_id)
+    if disabled_reason is not None:
+        raise ValueError(disabled_reason)
     card = state.card_catalog[card_no]
     if (card.cp or 0) > player.current_cp:
         raise ValueError("not enough cp")
@@ -2685,6 +2835,8 @@ def _resolve_untiring(
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
     owner_id = _ability_owner_id(event, triggered_ability)
+    if owner_id != event.player_id:
+        return []
     source = _find_unit_by_id(state, owner_id, triggered_ability.get("source_unit_id"))
     if source is None or not source.exhausted:
         return []
