@@ -369,6 +369,20 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
     if event_type == "turn_end":
         return f"{player_id}のターン終了"
+    if event_type == "unit_driven" and source_card_name:
+        return f"{player_id}が{source_card_name}をユニットドライブ"
+    if event_type == "card_set_to_trigger_zone" and source_card_name:
+        return f"{player_id}がトリガーゾーンに{source_card_name}をセット"
+    if event_type == "unit_overdriven" and source_card_name:
+        return f"{player_id}が{source_card_name}でオーバードライブ"
+    if event_type == "card_overridden" and source_card_name:
+        from_level = metadata.get("from_level")
+        to_level = metadata.get("to_level")
+        if isinstance(from_level, int) and isinstance(to_level, int):
+            return f"{player_id}が{source_card_name}をオーバーライド Lv.{from_level} -> Lv.{to_level}"
+        return f"{player_id}が{source_card_name}をオーバーライド"
+    if event_type == "unit_retreated" and source_card_name:
+        return f"{player_id}が{source_card_name}を撤退させる"
     if event_type == "attack_declared" and source_card_name:
         return f"{player_id}が{source_card_name}でアタックを宣言"
     if event_type == "block_declared" and source_card_name:
@@ -379,6 +393,29 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         if isinstance(current_damage, int) and isinstance(current_bp, int):
             return f"{player_id}の{source_card_name}が{amount}ダメージを受けた (累積ダメージ {current_damage} / BP {current_bp})"
         return f"{player_id}の{source_card_name}が{amount}ダメージを受けた"
+    if event_type == "ability_damage_dealt_to_unit" and source_card_name and isinstance(amount, int):
+        target_name = _lookup_card_name(metadata.get("target_card_no"), card_catalog)
+        effect_name = metadata.get("effect_name")
+        current_damage = metadata.get("current_damage")
+        current_bp = metadata.get("current_bp")
+        if target_name and effect_name and isinstance(current_damage, int) and isinstance(current_bp, int):
+            return (
+                f"{source_card_name}の{effect_name}が{target_name}に発動 "
+                f"({amount}ダメージ / 累積ダメージ {current_damage} / 現BP {current_bp})"
+            )
+        if target_name and effect_name:
+            return f"{source_card_name}の{effect_name}が{target_name}に発動 ({amount}ダメージ)"
+        if target_name:
+            return f"{source_card_name}が{target_name}に{amount}ダメージ"
+        return f"{source_card_name}の効果で{amount}ダメージ"
+    if event_type == "unit_bp_modified" and source_card_name and isinstance(amount, int):
+        target_name = _lookup_card_name(metadata.get("target_card_no"), card_catalog)
+        current_bp = metadata.get("current_bp")
+        if target_name and isinstance(current_bp, int):
+            return f"{source_card_name}の効果で{target_name}のBPが{amount:+d} (現BP {current_bp})"
+        if target_name:
+            return f"{source_card_name}の効果で{target_name}のBPが{amount:+d}"
+        return f"{source_card_name}の効果でBPが{amount:+d}"
     if event_type == "battle_resolved":
         result = metadata.get("result")
         attacker_name = _lookup_card_name(metadata.get("attacker_card_no"), card_catalog)
@@ -391,6 +428,11 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
             return f"戦闘結果: {attacker_name}と{blocker_name}は相打ち"
         return "戦闘結果が解決"
     if event_type == "unit_sent_to_discard" and source_card_name:
+        reason = metadata.get("reason")
+        if reason == "overdrive_material":
+            return f"{player_id}の{source_card_name}がオーバードライブ素材として捨札へ移動"
+        if reason == "retreat":
+            return f"{player_id}の{source_card_name}が撤退して捨札へ移動"
         return f"{player_id}の{source_card_name}が捨札へ移動"
     if event_type == "unit_clock_up" and source_card_name:
         from_level = metadata.get("from_level")
@@ -398,6 +440,24 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         if isinstance(from_level, int) and isinstance(to_level, int):
             return f"{player_id}の{source_card_name}がクロックアップ Lv.{from_level} -> Lv.{to_level}"
         return f"{player_id}の{source_card_name}がクロックアップ"
+    if event_type == "unit_level_changed" and source_card_name:
+        from_level = metadata.get("from_level")
+        to_level = metadata.get("to_level")
+        reason = metadata.get("reason")
+        if isinstance(from_level, int) and isinstance(to_level, int):
+            if reason == "overdrive":
+                return f"{player_id}の{source_card_name}のレベルがオーバードライブで Lv.{from_level} -> Lv.{to_level}"
+            return f"{player_id}の{source_card_name}のレベルが Lv.{from_level} -> Lv.{to_level}"
+        return f"{player_id}の{source_card_name}のレベルが変化"
+    if event_type == "card_moved" and source_card_name:
+        from_zone = metadata.get("from_zone")
+        to_zone = metadata.get("to_zone")
+        reason = metadata.get("reason")
+        if from_zone == "trigger_zone" and to_zone == "discard" and reason == "cost_reduction":
+            return f"{player_id}の{source_card_name}がコスト軽減で捨札へ移動"
+        if from_zone == "hand" and to_zone == "discard" and reason == "override_material":
+            return f"{player_id}の{source_card_name}がオーバーライド素材として捨札へ移動"
+        return f"{player_id}の{source_card_name}が{from_zone}から{to_zone}へ移動"
     if event_type == "trigger_used" and source_card_name:
         return f"{player_id}のトリガー {source_card_name} が発動"
     if event_type == "intercept_used" and source_card_name:
@@ -459,26 +519,6 @@ def _render_system_event_from_message(
     message: dict[str, object],
     card_catalog: dict[str, Any],
 ) -> str | None:
-    if direction != "RES":
-        return None
-    message_type = str(message.get("type", ""))
-    payload = message.get("payload", {})
-    if not isinstance(payload, dict):
-        return None
-    if message_type not in {"action", "choice_response"}:
-        return None
-    kind = str(payload.get("kind", ""))
-    card_name = _get_action_card_name(payload, card_catalog)
-    if kind == "drive" and card_name:
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をユニットドライブ")
-    if kind == "set_trigger" and card_name:
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}がトリガーゾーンに{card_name}をセット")
-    if kind == "overdrive" and card_name:
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}でオーバードライブ")
-    if kind == "override" and card_name:
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をオーバーライド")
-    if kind == "retreat" and card_name:
-        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}を撤退させる")
     return None
 
 

@@ -366,6 +366,90 @@ class DemoMatchTest(unittest.TestCase):
         self.assertTrue(any("P2が冥札再臨でブロックを宣言" in line for line in rendered))
 
     # トリガー発動とインターセプト使用もカード名つきで表示されることを確認する
+    # game_events 由来で drive や set_trigger などの行動系EVTが描画されることを確認する。
+    def test_render_trace_log_renders_action_events_from_game_events(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-004": type("Card", (), {"name": "ランサー"})(),
+                "1-0-061": type("Card", (), {"name": "不可侵防壁"})(),
+                "1-0-101": type("Card", (), {"name": "赤進化ユニット"})(),
+            },
+            [
+                {"round_no": 4, "player_id": "P1", "type": "unit_driven", "source_card_no": "1-0-004"},
+                {"round_no": 4, "player_id": "P1", "type": "card_set_to_trigger_zone", "source_card_no": "1-0-061"},
+                {"round_no": 4, "player_id": "P1", "type": "unit_overdriven", "source_card_no": "1-0-101"},
+                {
+                    "round_no": 4,
+                    "player_id": "P1",
+                    "type": "card_overridden",
+                    "source_card_no": "1-0-004",
+                    "metadata": {"from_level": 1, "to_level": 2},
+                },
+                {"round_no": 4, "player_id": "P1", "type": "unit_retreated", "source_card_no": "1-0-004"},
+            ],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("ランサーをユニットドライブ" in line for line in rendered))
+        self.assertTrue(any("トリガーゾーンに不可侵防壁をセット" in line for line in rendered))
+        self.assertTrue(any("赤進化ユニットでオーバードライブ" in line for line in rendered))
+        self.assertTrue(any("ランサーをオーバーライド Lv.1 -> Lv.2" in line for line in rendered))
+        self.assertTrue(any("ランサーを撤退させる" in line for line in rendered))
+
+    # 対象ユニットに与える能力ダメージもカード名つきで描画されることを確認する。
+    def test_render_trace_log_renders_targeted_ability_damage(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-004": type("Card", (), {"name": "ランサー"})(),
+                "2-0-010": type("Card", (), {"name": "見習い魔導士リーナ"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P2",
+                    "type": "ability_damage_dealt_to_unit",
+                    "source_card_no": "1-0-004",
+                    "amount": 1000,
+                    "metadata": {
+                        "target_card_no": "2-0-010",
+                        "current_damage": 1000,
+                        "current_bp": 3000,
+                        "effect_name": "ダメージブレイク",
+                    },
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("ランサーのダメージブレイクが見習い魔導士リーナに発動" in line for line in rendered))
+        self.assertTrue(any("現BP 3000" in line for line in rendered))
+
+    # インターセプトによるBP変動もカード名つきで描画されることを確認する。
+    def test_render_trace_log_renders_intercept_bp_change(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-096": type("Card", (), {"name": "不可侵防壁"})(),
+                "1-0-004": type("Card", (), {"name": "ランサー"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "type": "unit_bp_modified",
+                    "source_card_no": "1-0-096",
+                    "amount": 3000,
+                    "metadata": {"target_card_no": "1-0-004", "current_bp": 7000},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("不可侵防壁の効果でランサーのBPが+3000" in line for line in rendered))
+        self.assertTrue(any("現BP 7000" in line for line in rendered))
+
     def test_render_trace_log_renders_trigger_and_intercept_with_card_names(self) -> None:
         rendered = _render_trace_log(
             [

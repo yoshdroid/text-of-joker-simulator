@@ -446,7 +446,7 @@ def build_block_choice_payload(state: MatchState, player_id: PlayerId) -> dict[s
                     "card_no": unit.card_no,
                     "card_name": card.name,
                     "level": unit.level,
-                    "current_bp": get_unit_bp(state, unit),
+                    "current_bp": get_unit_current_bp(state, unit),
                     "current_damage": unit.current_damage,
                     "disabled_reason": "unit_exhausted",
                     "disabled_reason_message": _get_disabled_reason_message("unit_exhausted"),
@@ -464,12 +464,12 @@ def build_block_choice_payload(state: MatchState, player_id: PlayerId) -> dict[s
                 "card_no": unit.card_no,
                 "card_name": card.name,
                 "level": unit.level,
-                "current_bp": get_unit_bp(state, unit),
+                "current_bp": get_unit_current_bp(state, unit),
                 "current_damage": unit.current_damage,
                 "choice_label": f"Block with {card.name}",
-                "choice_summary": f"Lv.{unit.level} / {get_unit_bp(state, unit)} BP / damage {unit.current_damage}",
+                "choice_summary": f"Lv.{unit.level} / {get_unit_current_bp(state, unit)} BP / damage {unit.current_damage}",
                 "choice_label_ja": f"{card.name}でブロック",
-                "choice_summary_ja": f"Lv.{unit.level} / BP {get_unit_bp(state, unit)} / ダメージ {unit.current_damage}",
+                "choice_summary_ja": f"Lv.{unit.level} / BP {get_unit_current_bp(state, unit)} / ダメージ {unit.current_damage}",
             }
         )
     return {
@@ -591,9 +591,29 @@ def apply_drive_action(
 
     player.current_cp -= drive_cost
     player.hand.pop(hand_index)
+    if drive_cost > 0:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="cp_changed",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=card_no,
+                amount=-drive_cost,
+            ),
+        )
     if reducer_index is not None:
         reducer_card_no = player.trigger_zone.pop(reducer_index)
         player.discard_pile.insert(0, reducer_card_no)
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="card_moved",
+                player_id=player_id,
+                source_card_no=reducer_card_no,
+                metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "cost_reduction"},
+            ),
+        )
     attack_restricted = not _has_ability_name(state.card_catalog[card_no], "スピードムーブ")
     player.battlefield.append(
         UnitState(
@@ -604,6 +624,16 @@ def apply_drive_action(
             attack_restricted=attack_restricted,
             current_damage=0,
         )
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_driven",
+            player_id=player_id,
+            source_unit_id=player.battlefield[-1].unit_id,
+            source_card_no=card_no,
+            metadata={"level": card_level, "current_bp": get_unit_bp(state, player.battlefield[-1])},
+        ),
     )
     resolve_ability_events(
         state,
@@ -653,13 +683,44 @@ def apply_overdrive_action(
         raise ValueError("not enough cp")
 
     inherited_exhausted = target_unit.exhausted
+    previous_level = target_unit.level
 
     player.current_cp -= overdrive_cost
     player.hand.pop(hand_index)
+    if overdrive_cost > 0:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="cp_changed",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=card_no,
+                amount=-overdrive_cost,
+            ),
+        )
     if reducer_index is not None:
         reducer_card_no = player.trigger_zone.pop(reducer_index)
         player.discard_pile.insert(0, reducer_card_no)
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="card_moved",
+                player_id=player_id,
+                source_card_no=reducer_card_no,
+                metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "cost_reduction"},
+            ),
+        )
     player.discard_pile.insert(0, target_unit.card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_sent_to_discard",
+            player_id=player_id,
+            source_unit_id=target_unit.unit_id,
+            source_card_no=target_unit.card_no,
+            metadata={"reason": "overdrive_material"},
+        ),
+    )
     player.battlefield[target_index] = UnitState(
         card_no=card_no,
         unit_id=target_unit.unit_id,
@@ -667,6 +728,26 @@ def apply_overdrive_action(
         exhausted=False if evolved_level >= 3 else inherited_exhausted,
         attack_restricted=False,
         current_damage=0,
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_overdriven",
+            player_id=player_id,
+            source_unit_id=player.battlefield[target_index].unit_id,
+            source_card_no=card_no,
+            metadata={"base_card_no": target_card.card_no, "from_level": previous_level, "to_level": evolved_level},
+        ),
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_level_changed",
+            player_id=player_id,
+            source_unit_id=player.battlefield[target_index].unit_id,
+            source_card_no=card_no,
+            metadata={"from_level": previous_level, "to_level": evolved_level, "reason": "overdrive"},
+        ),
     )
     emitted_events = [
         AbilityEvent(
@@ -695,6 +776,25 @@ def apply_retreat_action(state: MatchState, player_id: PlayerId, action: dict[st
 
     unit = player.battlefield.pop(unit_index)
     player.discard_pile.insert(0, unit.card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_retreated",
+            player_id=player_id,
+            source_unit_id=unit.unit_id,
+            source_card_no=unit.card_no,
+        ),
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="unit_sent_to_discard",
+            player_id=player_id,
+            source_unit_id=unit.unit_id,
+            source_card_no=unit.card_no,
+            metadata={"reason": "retreat"},
+        ),
+    )
 
 
 def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:
@@ -709,6 +809,15 @@ def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dic
     hand_card_id = player.hand.pop(hand_index)
     card_no, _card_level = parse_hand_card_id(hand_card_id)
     player.trigger_zone.append(card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_set_to_trigger_zone",
+            player_id=player_id,
+            source_card_no=card_no,
+            metadata={"position": len(player.trigger_zone) - 1},
+        ),
+    )
     _record_card_use(state, card_no)
 
 
@@ -753,7 +862,36 @@ def apply_override_action(
 
     player.hand = [format_hand_card_id(base_card_no, new_level)] + remaining_hand
     player.discard_pile.insert(0, material_card_no)
-    draw_cards(player, 1, rng, state.regulation.hand_size_limit)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=material_card_no,
+            metadata={"from_zone": "hand", "to_zone": "discard", "reason": "override_material"},
+        ),
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_overridden",
+            player_id=player_id,
+            source_card_no=base_card_no,
+            metadata={"from_level": base_level, "to_level": new_level},
+        ),
+    )
+    drawn = draw_cards(player, 1, rng, state.regulation.hand_size_limit)
+    if drawn > 0:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="cards_drawn",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=base_card_no,
+                amount=drawn,
+            ),
+        )
     _record_card_use(state, base_card_no)
 
 
@@ -873,8 +1011,8 @@ def resolve_declared_attack_action(
             choice_resolver,
         )
         blocker.exhausted = True
-        attacker_bp = get_unit_bp(state, attacker)
-        blocker_bp = get_unit_bp(state, blocker)
+        attacker_bp = get_unit_current_bp(state, attacker)
+        blocker_bp = get_unit_current_bp(state, blocker)
         attacker.current_damage += blocker_bp
         blocker.current_damage += attacker_bp
         _record_ability_event(
@@ -887,7 +1025,7 @@ def resolve_declared_attack_action(
                 amount=blocker_bp,
                 metadata={
                     "current_damage": attacker.current_damage,
-                    "current_bp": get_unit_bp(state, attacker),
+                    "current_bp": get_unit_current_bp(state, attacker),
                     "role": "attacker",
                 },
             ),
@@ -902,7 +1040,7 @@ def resolve_declared_attack_action(
                 amount=attacker_bp,
                 metadata={
                     "current_damage": blocker.current_damage,
-                    "current_bp": get_unit_bp(state, blocker),
+                    "current_bp": get_unit_current_bp(state, blocker),
                     "role": "blocker",
                 },
             ),
@@ -1186,6 +1324,10 @@ def get_unit_bp(state: MatchState, unit: UnitState) -> int:
     )
 
 
+def get_unit_current_bp(state: MatchState, unit: UnitState) -> int:
+    return max(0, get_unit_bp(state, unit) - unit.current_damage)
+
+
 def _clock_up_unit(state: MatchState, player_id: PlayerId, unit: UnitState) -> list[AbilityEvent]:
     if unit.level >= 3:
         return []
@@ -1272,12 +1414,12 @@ def _build_enemy_unit_choices(state: MatchState, player_id: PlayerId) -> list[di
                 "card_no": unit.card_no,
                 "card_name": card.name,
                 "level": unit.level,
-                "current_bp": get_unit_bp(state, unit),
+                "current_bp": get_unit_current_bp(state, unit),
                 "current_damage": unit.current_damage,
                 "choice_label": f"Target {card.name}",
-                "choice_summary": f"Lv.{unit.level} / {get_unit_bp(state, unit)} BP / damage {unit.current_damage}",
+                "choice_summary": f"Lv.{unit.level} / {get_unit_current_bp(state, unit)} BP / damage {unit.current_damage}",
                 "choice_label_ja": f"{card.name}を対象にする",
-                "choice_summary_ja": f"Lv.{unit.level} / BP {get_unit_bp(state, unit)} / ダメージ {unit.current_damage}",
+                "choice_summary_ja": f"Lv.{unit.level} / BP {get_unit_current_bp(state, unit)} / ダメージ {unit.current_damage}",
             }
         )
     return choices
@@ -1366,12 +1508,32 @@ def _deal_damage_to_unit(
     player_id: PlayerId,
     unit: UnitState | None,
     amount: int,
+    source_card_no: str | None = None,
+    source_unit_id: int | None = None,
+    effect_name: str | None = None,
     rng: random.Random | None = None,
     choice_resolver: ChoiceResolver | None = None,
 ) -> None:
     if unit is None:
         return
     unit.current_damage += amount
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="ability_damage_dealt_to_unit",
+            player_id=player_id,
+            target_player_id=player_id,
+            source_unit_id=source_unit_id,
+            source_card_no=source_card_no,
+            amount=amount,
+            metadata={
+                "target_card_no": unit.card_no,
+                "current_damage": unit.current_damage,
+                "current_bp": get_unit_current_bp(state, unit),
+                "effect_name": effect_name,
+            },
+        ),
+    )
     _destroy_broken_units(state, player_id, rng or random.Random(0), choice_resolver)
 
 
@@ -1610,7 +1772,7 @@ def _build_battle_choice_payload(
             "card_no": own_unit.card_no,
             "card_name": state.card_catalog[own_unit.card_no].name,
             "level": own_unit.level,
-            "current_bp": get_unit_bp(state, own_unit),
+            "current_bp": get_unit_current_bp(state, own_unit),
             "current_damage": own_unit.current_damage,
             "is_attacker": own_unit_is_attacker,
         },
@@ -1618,7 +1780,7 @@ def _build_battle_choice_payload(
             "card_no": enemy_unit.card_no,
             "card_name": state.card_catalog[enemy_unit.card_no].name,
             "level": enemy_unit.level,
-            "current_bp": get_unit_bp(state, enemy_unit),
+            "current_bp": get_unit_current_bp(state, enemy_unit),
             "current_damage": enemy_unit.current_damage,
             "is_attacker": not own_unit_is_attacker,
         },
@@ -1635,20 +1797,75 @@ def _resolve_intercept_effect(
 ) -> None:
     if card_no == "1-0-065":
         enemy_unit.temporary_bp_modifier -= 2000
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_bp_modified",
+                player_id=get_opponent_id(player_id),
+                source_unit_id=enemy_unit.unit_id,
+                source_card_no=card_no,
+                amount=-2000,
+                metadata={"target_card_no": enemy_unit.card_no, "current_bp": get_unit_current_bp(state, enemy_unit)},
+            ),
+        )
         return
     if card_no == "1-0-074":
         own_unit.temporary_bp_modifier += 2000
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_bp_modified",
+                player_id=player_id,
+                source_unit_id=own_unit.unit_id,
+                source_card_no=card_no,
+                amount=2000,
+                metadata={"target_card_no": own_unit.card_no, "current_bp": get_unit_current_bp(state, own_unit)},
+            ),
+        )
         return
     if card_no == "1-0-081" and own_unit_is_attacker:
         own_unit.temporary_bp_modifier += 3000
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_bp_modified",
+                player_id=player_id,
+                source_unit_id=own_unit.unit_id,
+                source_card_no=card_no,
+                amount=3000,
+                metadata={"target_card_no": own_unit.card_no, "current_bp": get_unit_current_bp(state, own_unit)},
+            ),
+        )
         return
     if card_no == "1-0-091":
         own_unit.temporary_bp_modifier += 7000
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_bp_modified",
+                player_id=player_id,
+                source_unit_id=own_unit.unit_id,
+                source_card_no=card_no,
+                amount=7000,
+                metadata={"target_card_no": own_unit.card_no, "current_bp": get_unit_current_bp(state, own_unit)},
+            ),
+        )
         state.players[player_id].life -= 1
         _update_winner_by_life(state)
         return
     if card_no == "1-0-096":
         own_unit.temporary_bp_modifier += 3000
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_bp_modified",
+                player_id=player_id,
+                source_unit_id=own_unit.unit_id,
+                source_card_no=card_no,
+                amount=3000,
+                metadata={"target_card_no": own_unit.card_no, "current_bp": get_unit_current_bp(state, own_unit)},
+            ),
+        )
 
 
 def build_reactive_intercept_choice_payload(
@@ -1825,7 +2042,17 @@ def _resolve_lancer_attack(
         "Choose an enemy unit to deal 1000 damage.",
         choice_resolver,
     )
-    _deal_damage_to_unit(state, enemy_id, target, 1000)
+    _deal_damage_to_unit(
+        state,
+        enemy_id,
+        target,
+        1000,
+        source_card_no=triggered_ability["card_no"],
+        source_unit_id=event.source_unit_id,
+        effect_name="ダメージブレイク",
+        rng=rng,
+        choice_resolver=choice_resolver,
+    )
     return []
 
 
@@ -2390,7 +2617,7 @@ def _serialize_unit(unit: UnitState, state: MatchState | None) -> dict[str, Any]
         "current_damage": unit.current_damage,
     }
     if state is not None:
-        data["current_bp"] = get_unit_bp(state, unit)
+        data["current_bp"] = get_unit_current_bp(state, unit)
     return data
 
 

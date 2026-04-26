@@ -361,6 +361,19 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P1"].hand), 3)
         self.assertEqual(len(state.players["P1"].trigger_zone), 1)
 
+    # set_trigger ではトリガーゾーン配置イベントが記録されることを確認する。
+    def test_apply_set_trigger_action_records_event(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "set_trigger")
+
+        apply_action(state, "P1", action, random.Random(7))
+
+        event = state.event_log[-1]
+        self.assertEqual(event["type"], "card_set_to_trigger_zone")
+        self.assertEqual(event["player_id"], "P1")
+        self.assertEqual(event["source_card_no"], state.players["P1"].trigger_zone[0])
+
     # 撤退すると場のユニットが捨札へ移り、バトルフィールドから取り除かれることを確認する。
     def test_apply_retreat_action(self) -> None:
         state = self.create_state()
@@ -375,6 +388,21 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].battlefield, [])
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
 
+    # retreat では撤退イベントと捨札移動イベントが記録されることを確認する。
+    def test_apply_retreat_action_records_events(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].battlefield.append(
+            UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        )
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "retreat")
+
+        apply_action(state, "P1", action, random.Random(7))
+
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("unit_retreated", event_types)
+        self.assertIn("unit_sent_to_discard", event_types)
+
     # override では手札内同名カードを重ねて Lv.2 になり、素材が捨札へ送られて1枚ドローすることを確認する。
     def test_apply_override_action(self) -> None:
         state = self.create_state()
@@ -388,6 +416,21 @@ class GameStateTest(unittest.TestCase):
         self.assertIn("1-0-001@L2", state.players["P1"].hand)
         self.assertIn("1-0-003", state.players["P1"].hand)
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
+
+    # override では素材移動、レベル変化、1枚ドローのイベントが記録されることを確認する。
+    def test_apply_override_action_records_events(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].hand = ["1-0-001", "1-0-001", "1-0-002"]
+        state.players["P1"].draw_pile = ["1-0-003"] + state.players["P1"].draw_pile
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "override")
+
+        apply_action(state, "P1", action, random.Random(7))
+
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("card_moved", event_types)
+        self.assertIn("card_overridden", event_types)
+        self.assertIn("cards_drawn", event_types)
 
     # Lv.2 の同名カード同士を override すると Lv.3 になり、山札不足時は捨札を含む新山札から 1 枚引くことを確認する。
     def test_apply_override_action_reaches_level_three(self) -> None:
@@ -423,6 +466,19 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P1"].hand), 3)
         self.assertEqual(state.players["P1"].current_cp, 1)
         self.assertTrue(state.players["P1"].battlefield[0].attack_restricted)
+
+    # drive では CP消費とユニットドライブのイベントが記録されることを確認する。
+    def test_apply_drive_action_records_events(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        drive_action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+
+        apply_action(state, "P1", drive_action, random.Random(7))
+
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("cp_changed", event_types)
+        self.assertIn("unit_driven", event_types)
+        self.assertIn("unit_entered", event_types)
 
     # スピードムーブを持つユニットは出たターンでもアタック制限を受けないことを確認する。
     def test_apply_drive_action_with_speed_move_removes_attack_restriction(self) -> None:
@@ -643,6 +699,94 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(len(state.players["P1"].battlefield), 1)
         self.assertEqual(len(state.players["P2"].battlefield), 0)
 
+    # 戦闘で与えるダメージは基本BPではなく、戦闘開始時点の現BPを参照することを確認する。
+    def test_combat_damage_uses_current_bp_after_precombat_damage(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.card_catalog["1-0-004"] = CardDefinition(
+            card_no="1-0-004",
+            category="unit",
+            rarity="C",
+            color="red",
+            name="Lancer",
+            cp=1,
+            bp_by_level=(4, 5, 6),
+            abilities=(AbilityDefinition(name="ダメージブレイク", text=""),),
+            race="test",
+        )
+        state.card_catalog["2-0-010"] = CardDefinition(
+            card_no="2-0-010",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Rina",
+            cp=1,
+            bp_by_level=(4, 4, 4),
+            abilities=(),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-004", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-010", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+            lambda _player_id, _payload: {"kind": "choose_unit", "target_index": 0},
+        )
+
+        attacker_damage_event = next(
+            event
+            for event in state.event_log
+            if event["type"] == "battle_bp_changed" and event["player_id"] == "P1"
+        )
+        self.assertEqual(attacker_damage_event["amount"], 3000)
+
+    # ランサーのダメージブレイクは対象ユニット名つきのイベントとして記録されることを確認する。
+    def test_lancer_attack_records_damage_break_event(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.card_catalog["2-0-010"] = CardDefinition(
+            card_no="2-0-010",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Rina",
+            cp=1,
+            bp_by_level=(4, 4, 4),
+            abilities=(),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-004", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-010", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "no_block"},
+            random.Random(7),
+            lambda _player_id, _payload: {"kind": "choose_unit", "target_index": 0},
+        )
+
+        damage_event = next(event for event in state.event_log if event["type"] == "ability_damage_dealt_to_unit")
+        self.assertEqual(damage_event["source_card_no"], "1-0-004")
+        self.assertEqual(damage_event["amount"], 1000)
+        self.assertEqual(damage_event["metadata"]["target_card_no"], "2-0-010")
+        self.assertEqual(damage_event["metadata"]["effect_name"], "ダメージブレイク")
+
     # ゴライアスが戦闘勝利で Lv.3 になった時、オーバークロック能力で相手ライフが 1 減ることを確認する。
     def test_overclock_trigger_deals_life_damage(self) -> None:
         state = self.create_state()
@@ -695,6 +839,31 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-074")
         self.assertEqual(build_state_update_payload(state, "P1")["players"]["P1"]["battlefield"][0]["current_bp"], 5000)
 
+    # インターセプトでBPが変わった時は、その変化がイベントとして記録されることを確認する。
+    def test_apply_intercept_action_records_bp_modified_event(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [attacker]
+        state.players["P2"].battlefield = [blocker]
+        state.players["P1"].trigger_zone = ["1-0-074"]
+
+        apply_intercept_action(
+            state,
+            "P1",
+            {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-074"},
+            attacker,
+            blocker,
+            True,
+        )
+
+        bp_event = next(event for event in state.event_log if event["type"] == "unit_bp_modified")
+        self.assertEqual(bp_event["source_card_no"], "1-0-074")
+        self.assertEqual(bp_event["amount"], 2000)
+        self.assertEqual(bp_event["metadata"]["target_card_no"], "1-0-001")
+        self.assertEqual(bp_event["metadata"]["current_bp"], 5000)
+
     # 色指定 intercept は同色ユニットがいないと使用できず、赤ユニットがいれば使用可能になることを確認する
     def test_list_available_intercept_actions_respects_color_requirement(self) -> None:
         state = self.create_state()
@@ -737,11 +906,11 @@ class GameStateTest(unittest.TestCase):
         block_action = next(action for action in actions if action["kind"] == "block")
 
         self.assertEqual(block_action["card_name"], "Red Unit 1")
-        self.assertEqual(block_action["current_bp"], 4000)
+        self.assertEqual(block_action["current_bp"], 3000)
         self.assertIn("choice_label", block_action)
         self.assertIn("choice_summary", block_action)
         self.assertEqual(block_action["choice_label_ja"], "Red Unit 1でブロック")
-        self.assertIn("BP 4000", block_action["choice_summary_ja"])
+        self.assertIn("BP 3000", block_action["choice_summary_ja"])
 
     # exhausted ユニットしかいない場合、block choice payload に選べない理由が含まれることを確認する。
     def test_build_block_choice_payload_includes_unavailable_reason(self) -> None:
@@ -887,6 +1056,25 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].battlefield[0].card_no, "1-0-101")
         self.assertTrue(state.players["P1"].battlefield[0].exhausted)
         self.assertFalse(state.players["P1"].battlefield[0].attack_restricted)
+
+    # overdrive では素材の捨札移動とレベル変化を含むイベントが記録されることを確認する。
+    def test_apply_overdrive_action_records_events(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].current_cp = 2
+        state.players["P1"].hand = ["1-0-101"]
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-001", unit_id=5, level=1, exhausted=True, attack_restricted=True, current_damage=2)
+        ]
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "overdrive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        event_types = [event["type"] for event in state.event_log]
+        self.assertIn("cp_changed", event_types)
+        self.assertIn("unit_sent_to_discard", event_types)
+        self.assertIn("unit_overdriven", event_types)
+        self.assertIn("unit_level_changed", event_types)
         self.assertEqual(state.players["P1"].battlefield[0].current_damage, 0)
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-001")
 
