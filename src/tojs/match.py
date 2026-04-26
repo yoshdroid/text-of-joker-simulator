@@ -6,9 +6,11 @@ from typing import Any
 
 from .engine import BootstrapContext, validate_submitted_deck
 from .game import (
+    apply_reactive_intercept_action,
     apply_intercept_action,
     MatchState,
     apply_action,
+    build_reactive_intercept_choice_payload,
     apply_mulligan,
     build_block_choice_payload,
     build_intercept_choice_payload,
@@ -146,7 +148,9 @@ def play_single_action_cycle(
     if action_response.payload.get("kind") == "attack":
         defender_id = "P2" if actor_id == "P1" else "P1"
         defender = players[defender_id]
+        pre_action_units = _snapshot_battlefield_units(state)
         declare_attack_action(state, actor_id, action_response.payload, rng, choice_resolver)
+        _request_reactive_intercepts(state, players, actor_id, "unit_attacked", trace_log)
         if state.winner is not None:
             _broadcast_state_update(state, players, trace_log, request_prefix="final-state")
             return state
@@ -176,8 +180,13 @@ def play_single_action_cycle(
             )
 
         resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng, choice_resolver)
+        _request_destroyed_unit_intercepts(state, players, pre_action_units, trace_log)
     else:
+        pre_action_units = _snapshot_battlefield_units(state)
         apply_action(state, actor_id, action_response.payload, rng, choice_resolver)
+        if action_response.payload.get("kind") in {"drive", "overdrive"}:
+            _request_reactive_intercepts(state, players, actor_id, "unit_entered", trace_log)
+        _request_destroyed_unit_intercepts(state, players, pre_action_units, trace_log)
     if state.winner is not None:
         _broadcast_state_update(state, players, trace_log, request_prefix="final-state")
     return state
@@ -319,3 +328,40 @@ def _request_battle_intercepts(
         else:
             pass_count += 1
         order_index += 1
+
+
+def _request_reactive_intercepts(
+    state: MatchState,
+    players: dict[str, PlayerProcess],
+    player_id: str,
+    event_type: str,
+    trace_log: TraceLog | None,
+) -> None:
+    choice_resolver = _build_choice_resolver(players, state, trace_log)
+    payload = build_reactive_intercept_choice_payload(state, player_id, event_type)
+    available_actions = payload.get("available_choices", [])
+    if not any(action.get("kind") == "use_intercept" for action in available_actions):
+        return
+    chosen_action = choice_resolver(player_id, payload)
+    apply_reactive_intercept_action(state, player_id, chosen_action, event_type, random.Random(state.turn_serial), None)
+
+
+def _snapshot_battlefield_units(state: MatchState) -> dict[str, list[tuple[int, str]]]:
+    return {
+        player_id: [(unit.unit_id, unit.card_no) for unit in player.battlefield]
+        for player_id, player in state.players.items()
+    }
+
+
+def _request_destroyed_unit_intercepts(
+    state: MatchState,
+    players: dict[str, PlayerProcess],
+    previous_units: dict[str, list[tuple[int, str]]],
+    trace_log: TraceLog | None,
+) -> None:
+    current_units = _snapshot_battlefield_units(state)
+    for player_id in ("P1", "P2"):
+        previous_ids = {unit_id for unit_id, _card_no in previous_units.get(player_id, [])}
+        current_ids = {unit_id for unit_id, _card_no in current_units.get(player_id, [])}
+        if previous_ids - current_ids:
+            _request_reactive_intercepts(state, players, player_id, "unit_destroyed", trace_log)

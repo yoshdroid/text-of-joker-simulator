@@ -47,6 +47,7 @@ class MatchState:
     turn_serial: int = 0
     winner: str | None = None
     ended_reason: str | None = None
+    used_card_nos_this_turn: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class AbilityEvent:
     player_id: PlayerId
     source_unit_id: int | None = None
     target_player_id: PlayerId | None = None
+    source_card_no: str | None = None
 
 
 def create_match_state(
@@ -105,6 +107,7 @@ def apply_mulligan(state: MatchState, player_id: PlayerId, do_mulligan: bool, rn
 def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> None:
     state.turn_player_id = player_id
     state.turn_serial += 1
+    state.used_card_nos_this_turn = []
     player = state.players[player_id]
     draw_count = get_scheduled_draw_count(state, player)
     cp_value = get_scheduled_cp(state, player)
@@ -451,6 +454,7 @@ def build_block_choice_payload(state: MatchState, player_id: PlayerId) -> dict[s
         "prompt": "Choose a blocker or no block.",
         "available_choices": actions,
         "unavailable_choices": unavailable_choices,
+        "no_valid_target": "有効な対象がいないため使えません。",
     }
 
 
@@ -588,6 +592,7 @@ def apply_drive_action(
         rng,
         choice_resolver,
     )
+    _record_card_use(state, card_no)
 
 
 def apply_overdrive_action(
@@ -654,6 +659,7 @@ def apply_overdrive_action(
             )
         )
     resolve_ability_events(state, emitted_events, rng, choice_resolver)
+    _record_card_use(state, card_no)
 
 
 def apply_retreat_action(state: MatchState, player_id: PlayerId, action: dict[str, Any]) -> None:
@@ -678,6 +684,7 @@ def apply_set_trigger_action(state: MatchState, player_id: PlayerId, action: dic
     hand_card_id = player.hand.pop(hand_index)
     card_no, _card_level = parse_hand_card_id(hand_card_id)
     player.trigger_zone.append(card_no)
+    _record_card_use(state, card_no)
 
 
 def apply_override_action(
@@ -722,6 +729,7 @@ def apply_override_action(
     player.hand = [format_hand_card_id(base_card_no, new_level)] + remaining_hand
     player.discard_pile.insert(0, material_card_no)
     draw_cards(player, 1, rng, state.regulation.hand_size_limit)
+    _record_card_use(state, base_card_no)
 
 
 def apply_attack_action(
@@ -806,6 +814,19 @@ def resolve_declared_attack_action(
     if block_action is not None and block_action.get("kind") == "block":
         blocker_index = block_action["blocker_index"]
         blocker = defender.battlefield[blocker_index]
+        resolve_ability_events(
+            state,
+            [
+                AbilityEvent(
+                    type="unit_blocked",
+                    player_id=defender_id,
+                    source_unit_id=blocker.unit_id,
+                    target_player_id=player_id,
+                )
+            ],
+            rng,
+            choice_resolver,
+        )
         blocker.exhausted = True
         attacker.current_damage += get_unit_bp(state, blocker)
         blocker.current_damage += get_unit_bp(state, attacker)
@@ -820,8 +841,8 @@ def resolve_declared_attack_action(
             emitted_events.extend(_clock_up_unit(defender_id, blocker))
         if emitted_events:
             resolve_ability_events(state, emitted_events, rng, choice_resolver)
-        _destroy_broken_units(state, player_id)
-        _destroy_broken_units(state, defender_id)
+        _destroy_broken_units(state, player_id, rng, choice_resolver)
+        _destroy_broken_units(state, defender_id, rng, choice_resolver)
         _update_winner_by_life(state)
         return
 
@@ -865,7 +886,8 @@ def apply_intercept_action(
     player.current_cp -= card.cp or 0
     used_card_no = player.trigger_zone.pop(trigger_index)
     player.discard_pile.insert(0, used_card_no)
-    _resolve_intercept_effect(card_no, own_unit, enemy_unit, own_unit_is_attacker)
+    _resolve_intercept_effect(state, player_id, card_no, own_unit, enemy_unit, own_unit_is_attacker)
+    _record_card_use(state, card_no)
 
 
 def get_drive_cost(state: MatchState, player_id: PlayerId, card_no: str) -> tuple[int, int | None]:
@@ -885,7 +907,7 @@ def find_trigger_reducer_index(state: MatchState, player_id: PlayerId, card_no: 
     target_card = state.card_catalog[card_no]
     for index, trigger_card_no in enumerate(player.trigger_zone):
         trigger_card = state.card_catalog[trigger_card_no]
-        if trigger_card.color == target_card.color and trigger_card.category in {"unit", "evolution"}:
+        if _colors_match(trigger_card.color, target_card.color) and trigger_card.category in {"unit", "evolution"}:
             return index
     return None
 
@@ -952,6 +974,17 @@ def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[
                     source_unit_id=unit.unit_id,
                 )
             )
+    if event.type == "unit_destroyed" and event.source_card_no is not None:
+        triggered.extend(
+            _build_triggered_abilities_for_card(
+                state,
+                event.source_card_no,
+                event.type,
+                event.player_id,
+                "graveyard",
+                source_unit_id=event.source_unit_id,
+            )
+        )
     return triggered
 
 
@@ -1191,11 +1224,18 @@ def _choose_hand_card_to_discard(
     return hand_index
 
 
-def _deal_damage_to_unit(state: MatchState, player_id: PlayerId, unit: UnitState | None, amount: int) -> None:
+def _deal_damage_to_unit(
+    state: MatchState,
+    player_id: PlayerId,
+    unit: UnitState | None,
+    amount: int,
+    rng: random.Random | None = None,
+    choice_resolver: ChoiceResolver | None = None,
+) -> None:
     if unit is None:
         return
     unit.current_damage += amount
-    _destroy_broken_units(state, player_id)
+    _destroy_broken_units(state, player_id, rng or random.Random(0), choice_resolver)
 
 
 def _draw_cards_by_category(
@@ -1302,19 +1342,47 @@ def _get_intercept_disabled_reason(
     if (card.cp or 0) > player.current_cp:
         return "not_enough_cp"
     if not _is_colorless(card.color) and not any(
-        state.card_catalog[unit.card_no].color == card.color for unit in player.battlefield
+        _colors_match(state.card_catalog[unit.card_no].color, card.color) for unit in player.battlefield
     ):
         return "color_requirement_not_met"
     if card_no == "1-0-081" and not own_unit_is_attacker:
         return "attacker_only"
-    if card_no not in {"1-0-065", "1-0-074", "1-0-081", "1-0-096"}:
+    if card_no not in {"1-0-065", "1-0-074", "1-0-081", "1-0-091", "1-0-096"}:
         return "effect_not_implemented"
     return None
 
 
 def _is_colorless(color: str) -> bool:
-    normalized = color.strip().lower()
-    return normalized in {"colorless", "none"} or any(ord(ch) == 28961 for ch in color)
+    return _normalize_color(color) == "colorless"
+
+
+def _normalize_color(color: str) -> str:
+    stripped = color.strip()
+    lowered = stripped.lower()
+    aliases = {
+        "red": "red",
+        "赤": "red",
+        "blue": "blue",
+        "青": "blue",
+        "green": "green",
+        "緑": "green",
+        "yellow": "yellow",
+        "黄": "yellow",
+        "colorless": "colorless",
+        "none": "colorless",
+        "無": "colorless",
+    }
+    if lowered in aliases:
+        return aliases[lowered]
+    if stripped in aliases:
+        return aliases[stripped]
+    if any(ord(ch) == 28961 for ch in color):
+        return "colorless"
+    return lowered
+
+
+def _colors_match(left: str, right: str) -> bool:
+    return _normalize_color(left) == _normalize_color(right)
 
 
 def _get_disabled_reason_message(disabled_reason: str) -> str:
@@ -1372,6 +1440,8 @@ def _build_battle_choice_payload(
 
 
 def _resolve_intercept_effect(
+    state: MatchState,
+    player_id: PlayerId,
     card_no: str,
     own_unit: UnitState,
     enemy_unit: UnitState,
@@ -1386,8 +1456,90 @@ def _resolve_intercept_effect(
     if card_no == "1-0-081" and own_unit_is_attacker:
         own_unit.temporary_bp_modifier += 3000
         return
+    if card_no == "1-0-091":
+        own_unit.temporary_bp_modifier += 7000
+        state.players[player_id].life -= 1
+        _update_winner_by_life(state)
+        return
     if card_no == "1-0-096":
         own_unit.temporary_bp_modifier += 3000
+
+
+def build_reactive_intercept_choice_payload(
+    state: MatchState,
+    player_id: PlayerId,
+    event_type: str,
+) -> dict[str, Any]:
+    player = state.players[player_id]
+    actions: list[dict[str, Any]] = [
+        {
+            "kind": "no_intercept",
+            "choice_label": "Pass intercept",
+            "choice_summary": "Do not use an intercept in this step.",
+            "choice_label_ja": "インターセプトしない",
+            "choice_summary_ja": "このタイミングではインターセプトを使いません。",
+        }
+    ]
+    unavailable_choices: list[dict[str, Any]] = []
+    for trigger_index, card_no in enumerate(player.trigger_zone):
+        card = state.card_catalog[card_no]
+        if card.category != "intercept":
+            continue
+        if not _supports_reactive_intercept_event(card_no, event_type):
+            continue
+        if (card.cp or 0) > player.current_cp:
+            unavailable_choices.append(_build_unavailable_intercept_choice(card, trigger_index, "not_enough_cp"))
+            continue
+        if not _is_colorless(card.color) and not any(
+            _colors_match(state.card_catalog[unit.card_no].color, card.color) for unit in player.battlefield
+        ):
+            unavailable_choices.append(
+                _build_unavailable_intercept_choice(card, trigger_index, "color_requirement_not_met")
+            )
+            continue
+        target_choices = _build_reactive_intercept_target_choices(state, player_id, card_no, trigger_index, event_type)
+        if not target_choices:
+            unavailable_choices.append(_build_unavailable_intercept_choice(card, trigger_index, "no_valid_target"))
+            continue
+        actions.extend(target_choices)
+    return {
+        "round_no": state.round_no,
+        "turn_serial": state.turn_serial,
+        "choice_kind": "intercept",
+        "prompt": "Choose an intercept or pass.",
+        "available_choices": actions,
+        "unavailable_choices": unavailable_choices,
+        "intercept_event_type": event_type,
+    }
+
+
+def apply_reactive_intercept_action(
+    state: MatchState,
+    player_id: PlayerId,
+    action: dict[str, Any],
+    event_type: str,
+    rng: random.Random | None = None,
+    choice_resolver: ChoiceResolver | None = None,
+) -> None:
+    if action.get("kind") != "use_intercept":
+        return
+    if rng is None:
+        rng = random.Random(0)
+    player = state.players[player_id]
+    trigger_index = int(action["trigger_index"])
+    if trigger_index < 0 or trigger_index >= len(player.trigger_zone):
+        raise ValueError(f"invalid trigger index: {trigger_index}")
+    card_no = player.trigger_zone[trigger_index]
+    if not _supports_reactive_intercept_event(card_no, event_type):
+        raise ValueError(f"intercept does not support event: {card_no} {event_type}")
+    card = state.card_catalog[card_no]
+    if (card.cp or 0) > player.current_cp:
+        raise ValueError("not enough cp")
+    player.current_cp -= card.cp or 0
+    used_card_no = player.trigger_zone.pop(trigger_index)
+    player.discard_pile.insert(0, used_card_no)
+    _resolve_reactive_intercept_effect(state, player_id, action, event_type, rng, choice_resolver)
+    _record_card_use(state, card_no)
 
 
 def _resolve_happaloid_enter(
@@ -1585,8 +1737,333 @@ def _resolve_untiring(
     return []
 
 
+def _resolve_revive_overclock(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    chosen = _choose_discard_card(
+        state,
+        event.player_id,
+        triggered_ability["card_no"],
+        "Choose a discard pile card to return to hand.",
+        choice_resolver,
+        category=None,
+    )
+    if chosen is not None:
+        _move_discard_to_hand(state, event.player_id, chosen)
+    return []
+
+
+def _resolve_revive_unit_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    player = state.players[event.player_id]
+    unit_indexes = [
+        index
+        for index, card_no in enumerate(player.discard_pile)
+        if state.card_catalog[card_no].category == "unit"
+    ]
+    if not unit_indexes:
+        return []
+    chosen_index = rng.choice(unit_indexes)
+    _move_discard_to_hand(state, event.player_id, chosen_index)
+    return []
+
+
+def _resolve_destroy_high_level_units(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    enemy_id = get_opponent_id(event.player_id)
+    enemy = state.players[enemy_id]
+    destroy_indexes = [
+        index
+        for index, unit in enumerate(enemy.battlefield)
+        if unit.level >= 2
+    ]
+    for destroy_index in reversed(destroy_indexes):
+        _destroy_unit_by_index(state, enemy_id, destroy_index, rng, choice_resolver)
+    return []
+
+
+def _resolve_charge_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    player = state.players[event.player_id]
+    player.current_cp = min(player.current_cp + 2, state.regulation.max_cp_per_round)
+    return []
+
+
+def _resolve_grind_draw_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    if source is None:
+        return []
+    for used_card_no in state.used_card_nos_this_turn:
+        if used_card_no == source.card_no:
+            continue
+        used_card = state.card_catalog[used_card_no]
+        if _normalize_color(used_card.color) == "green" and (used_card.cp or 0) >= 2:
+            draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+            break
+    return []
+
+
+def _resolve_grind_beetle_enter(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    _resolve_charge_enter(state, event, triggered_ability, rng, choice_resolver)
+    _resolve_grind_draw_enter(state, event, triggered_ability, rng, choice_resolver)
+    return []
+
+
+def _resolve_blocker_bonus(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    if source is not None:
+        source.temporary_bp_modifier += 2000
+    return []
+
+
+def _resolve_lost_on_destroy(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    opponent = state.players[get_opponent_id(event.player_id)]
+    if not opponent.hand:
+        return []
+    chosen_index = rng.randrange(len(opponent.hand))
+    _discard_hand_card_by_index(state, opponent.player_id, chosen_index)
+    return []
+
+
+def _resolve_intercept_draw_on_destroy(
+    state: MatchState,
+    event: AbilityEvent,
+    triggered_ability: dict[str, Any],
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> list[AbilityEvent]:
+    _draw_cards_by_category(state, event.player_id, "intercept", 1)
+    return []
+
+
+def _build_unavailable_intercept_choice(card: CardDefinition, trigger_index: int, reason: str) -> dict[str, Any]:
+    return {
+        "kind": "use_intercept",
+        "trigger_index": trigger_index,
+        "card_no": card.card_no,
+        "card_name": card.name,
+        "cost": card.cp or 0,
+        "disabled_reason": reason,
+        "disabled_reason_message": _get_disabled_reason_message(reason),
+        "choice_label": f"Use {card.name}",
+        "choice_summary": f"Unavailable: {reason}",
+        "choice_label_ja": f"{card.name}を使う",
+        "choice_summary_ja": _get_disabled_reason_message(reason),
+    }
+
+
+def _supports_reactive_intercept_event(card_no: str, event_type: str) -> bool:
+    supported = {
+        ("1-0-069", "unit_entered"),
+        ("1-0-089", "unit_attacked"),
+        ("1-0-092", "unit_destroyed"),
+    }
+    return (card_no, event_type) in supported
+
+
+def _build_reactive_intercept_target_choices(
+    state: MatchState,
+    player_id: PlayerId,
+    card_no: str,
+    trigger_index: int,
+    event_type: str,
+) -> list[dict[str, Any]]:
+    enemy_id = get_opponent_id(player_id)
+    enemy_units = state.players[enemy_id].battlefield
+    card = state.card_catalog[card_no]
+    choices: list[dict[str, Any]] = []
+    for target_index, unit in enumerate(enemy_units):
+        if card_no == "1-0-089" and unit.level < 2:
+            continue
+        target_card = state.card_catalog[unit.card_no]
+        choices.append(
+            {
+                "kind": "use_intercept",
+                "trigger_index": trigger_index,
+                "card_no": card_no,
+                "card_name": card.name,
+                "cost": card.cp or 0,
+                "target_index": target_index,
+                "target_card_no": unit.card_no,
+                "target_card_name": target_card.name,
+                "choice_label": f"Use {card.name}",
+                "choice_summary": f"Target {target_card.name}",
+                "choice_label_ja": f"{card.name}を使う",
+                "choice_summary_ja": f"対象 {target_card.name}",
+                "intercept_event_type": event_type,
+            }
+        )
+    return choices
+
+
+def _resolve_reactive_intercept_effect(
+    state: MatchState,
+    player_id: PlayerId,
+    action: dict[str, Any],
+    event_type: str,
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> None:
+    enemy_id = get_opponent_id(player_id)
+    card_no = action["card_no"]
+    if card_no == "1-0-069":
+        target = _get_battlefield_unit_by_index(state, enemy_id, int(action["target_index"]))
+        if target is None:
+            return
+        target.level = 3
+        target.current_damage = 0
+        return
+    if card_no in {"1-0-089", "1-0-092"}:
+        _destroy_unit_by_index(state, enemy_id, int(action["target_index"]), rng, choice_resolver)
+        return
+
+
+def _get_battlefield_unit_by_index(state: MatchState, player_id: PlayerId, index: int) -> UnitState | None:
+    battlefield = state.players[player_id].battlefield
+    if index < 0 or index >= len(battlefield):
+        return None
+    return battlefield[index]
+
+
+def _destroy_unit_by_index(
+    state: MatchState,
+    player_id: PlayerId,
+    target_index: int,
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None = None,
+) -> None:
+    player = state.players[player_id]
+    if target_index < 0 or target_index >= len(player.battlefield):
+        return
+    target = player.battlefield.pop(target_index)
+    player.discard_pile.insert(0, target.card_no)
+    resolve_ability_events(
+        state,
+        [
+            AbilityEvent(
+                type="unit_destroyed",
+                player_id=player_id,
+                source_unit_id=target.unit_id,
+                source_card_no=target.card_no,
+                target_player_id=get_opponent_id(player_id),
+            )
+        ],
+        rng,
+        choice_resolver,
+    )
+
+
+def _build_discard_choices(state: MatchState, player_id: PlayerId, category: str | None) -> list[dict[str, Any]]:
+    choices: list[dict[str, Any]] = []
+    player = state.players[player_id]
+    for discard_index, card_no in enumerate(player.discard_pile):
+        card = state.card_catalog[card_no]
+        if category is not None and card.category != category:
+            continue
+        choices.append(
+            {
+                "kind": "choose_discard",
+                "discard_index": discard_index,
+                "card_no": card_no,
+                "card_name": card.name,
+                "choice_label": f"Return {card.name}",
+                "choice_summary": f"Discard index {discard_index}",
+                "choice_label_ja": f"{card.name}を回収",
+                "choice_summary_ja": f"捨札位置 {discard_index}",
+            }
+        )
+    return choices
+
+
+def _choose_discard_card(
+    state: MatchState,
+    player_id: PlayerId,
+    source_card_no: str,
+    prompt: str,
+    choice_resolver: ChoiceResolver | None,
+    category: str | None,
+) -> int | None:
+    choices = _build_discard_choices(state, player_id, category)
+    if not choices:
+        return None
+    selected = _request_choice(
+        player_id,
+        {
+            "round_no": state.round_no,
+            "turn_serial": state.turn_serial,
+            "choice_kind": "discard_pile",
+            "prompt": prompt,
+            "source_card_no": source_card_no,
+            "available_choices": choices,
+        },
+        choice_resolver,
+    )
+    discard_index = int(selected.get("discard_index", 0))
+    if discard_index < 0 or discard_index >= len(state.players[player_id].discard_pile):
+        return None
+    return discard_index
+
+
+def _move_discard_to_hand(state: MatchState, player_id: PlayerId, discard_index: int) -> bool:
+    player = state.players[player_id]
+    if discard_index < 0 or discard_index >= len(player.discard_pile):
+        return False
+    if len(player.hand) >= state.regulation.hand_size_limit:
+        return False
+    card_no = player.discard_pile.pop(discard_index)
+    player.hand.append(card_no)
+    return True
+
+
 ABILITY_REGISTRY: dict[tuple[str, str], Any] = {
+    ("1-0-031", "unit_overclocked"): _resolve_revive_overclock,
+    ("1-0-033", "unit_entered"): _resolve_revive_unit_enter,
+    ("1-0-039", "unit_entered"): _resolve_destroy_high_level_units,
     ("1-0-040", "unit_entered"): _resolve_happaloid_enter,
+    ("1-0-043", "unit_entered"): _resolve_grind_beetle_enter,
     ("1-0-012", "unit_entered"): _resolve_ririmu_enter,
     ("1-0-051", "unit_entered"): _resolve_barbatos_enter,
     ("1-0-002", "unit_attacked"): _resolve_swordfighter_attack,
@@ -1598,6 +2075,9 @@ ABILITY_REGISTRY: dict[tuple[str, str], Any] = {
     ("1-0-057", "unit_entered"): _resolve_draw_trigger_cards,
     ("1-0-061", "unit_entered"): _resolve_draw_intercept_card,
     ("1-0-062", "unit_entered"): _resolve_draw_any_card,
+    ("1-0-045", "unit_blocked"): _resolve_blocker_bonus,
+    ("1-0-027", "unit_destroyed"): _resolve_lost_on_destroy,
+    ("1-0-029", "unit_destroyed"): _resolve_intercept_draw_on_destroy,
     ("1-0-044", "turn_end"): _resolve_untiring,
     ("1-0-048", "turn_end"): _resolve_untiring,
 }
@@ -1628,15 +2108,42 @@ def _serialize_unit(unit: UnitState, state: MatchState | None) -> dict[str, Any]
     return data
 
 
-def _destroy_broken_units(state: MatchState, player_id: PlayerId) -> None:
+def _destroy_broken_units(
+    state: MatchState,
+    player_id: PlayerId,
+    rng: random.Random | None = None,
+    choice_resolver: ChoiceResolver | None = None,
+) -> None:
     player = state.players[player_id]
     survivors: list[UnitState] = []
+    destroyed_units: list[UnitState] = []
     for unit in player.battlefield:
         if unit.current_damage >= get_unit_bp(state, unit):
             player.discard_pile.insert(0, unit.card_no)
+            destroyed_units.append(unit)
         else:
             survivors.append(unit)
     player.battlefield = survivors
+    if destroyed_units:
+        resolve_ability_events(
+            state,
+            [
+                AbilityEvent(
+                    type="unit_destroyed",
+                    player_id=player_id,
+                    source_unit_id=unit.unit_id,
+                    source_card_no=unit.card_no,
+                    target_player_id=get_opponent_id(player_id),
+                )
+                for unit in destroyed_units
+            ],
+            rng or random.Random(0),
+            choice_resolver,
+        )
+
+
+def _record_card_use(state: MatchState, card_no: str) -> None:
+    state.used_card_nos_this_turn.append(card_no)
 
 
 def _update_winner_by_life(state: MatchState) -> None:

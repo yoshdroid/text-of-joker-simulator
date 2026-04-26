@@ -1,4 +1,4 @@
-import random
+﻿import random
 import unittest
 
 from tojs.game import (
@@ -6,8 +6,10 @@ from tojs.game import (
     apply_action,
     apply_attack_action,
     apply_intercept_action,
+    apply_reactive_intercept_action,
     build_block_choice_payload,
     build_intercept_choice_payload,
+    build_reactive_intercept_choice_payload,
     build_state_update_payload,
     create_match_state,
     list_available_block_actions,
@@ -1221,6 +1223,425 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(state.players["P1"].battlefield[0].level, 3)
         self.assertEqual(state.players["P1"].battlefield[0].current_damage, 3000)
+
+    # OC時のリバイブは捨札から選んだカードを手札に戻せることを確認する。
+    def test_overclock_revive_returns_selected_discard_card(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-031"] = CardDefinition(
+            card_no="1-0-031",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Revive OC Unit",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(AbilityDefinition(name="リバイブ", text=""),),
+            race="test",
+        )
+        state.card_catalog["2-0-900"] = CardDefinition(
+            card_no="2-0-900",
+            category="unit",
+            rarity="C",
+            color="red",
+            name="Weak Enemy",
+            cp=1,
+            bp_by_level=(1, 1, 1),
+            abilities=(),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-031", unit_id=1, level=2, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].discard_pile = ["1-0-002", "1-0-003"]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-900", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        def choice_resolver(_player_id, payload):
+            return {"kind": "choose_discard", "discard_index": 1}
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+            choice_resolver,
+        )
+
+        self.assertIn("1-0-003", state.players["P1"].hand)
+
+    # 登場時リバイブは自分の捨札のユニットをランダムで手札へ戻すことを確認する。
+    def test_revive_unit_enter_returns_random_unit_from_discard(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-033"] = CardDefinition(
+            card_no="1-0-033",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Revive Enter Unit",
+            cp=3,
+            bp_by_level=(5, 6, 7),
+            abilities=(AbilityDefinition(name="リバイブ", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].hand = ["1-0-033"]
+        state.players["P1"].discard_pile = ["1-0-002", "1-0-061"]
+        state.players["P1"].current_cp = 3
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertIn("1-0-002", state.players["P1"].hand)
+
+    # ハデス登場時は相手のLv.2以上ユニットをすべて破壊することを確認する。
+    def test_hades_enter_destroys_all_enemy_level_two_or_higher(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-031"] = CardDefinition(
+            card_no="1-0-031",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Blue Support Unit",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-039"] = CardDefinition(
+            card_no="1-0-039",
+            category="evolution",
+            rarity="R",
+            color="blue",
+            name="Hades",
+            cp=4,
+            bp_by_level=(6, 7, 8),
+            abilities=(AbilityDefinition(name="血塗られし報復", text=""),),
+            race="test",
+        )
+        state.card_catalog["1-0-027"] = CardDefinition(
+            card_no="1-0-027",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Lost Unit",
+            cp=1,
+            bp_by_level=(1, 2, 3),
+            abilities=(AbilityDefinition(name="ロスト", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].hand = ["1-0-039"]
+        state.players["P1"].current_cp = 4
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-031", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-002", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="1-0-027", unit_id=3, level=2, exhausted=False, attack_restricted=False),
+            UnitState(card_no="2-0-004", unit_id=4, level=3, exhausted=False, attack_restricted=False),
+        ]
+        state.players["P1"].hand = ["1-0-039"]
+        action = {
+            "kind": "overdrive",
+            "hand_index": 0,
+            "card_no": "1-0-039",
+            "target_index": 0,
+            "cost": 4,
+            "trigger_reducer_index": None,
+            "card_level": 1,
+        }
+
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertEqual(len(state.players["P2"].battlefield), 1)
+        self.assertEqual(state.players["P2"].battlefield[0].card_no, "2-0-002")
+        self.assertEqual(len(state.players["P1"].hand), 0)
+
+    # グラインドビートルはチャージでCP+2し、先に緑2CP以上を使っていれば1ドローすることを確認する。
+    def test_grind_beetle_enter_adds_cp_and_draws_if_prior_green_cost_two_plus_was_used(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-043"] = CardDefinition(
+            card_no="1-0-043",
+            category="unit",
+            rarity="R",
+            color="green",
+            name="Grind Beetle",
+            cp=3,
+            bp_by_level=(5, 6, 7),
+            abilities=(
+                AbilityDefinition(name="チャージ", text=""),
+                AbilityDefinition(name="連撃・グラインドドロー", text=""),
+            ),
+            race="test",
+        )
+        state.card_catalog["1-0-200"] = CardDefinition(
+            card_no="1-0-200",
+            category="unit",
+            rarity="C",
+            color="green",
+            name="Big Green",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.used_card_nos_this_turn = ["1-0-200"]
+        state.players["P1"].hand = ["1-0-043"]
+        state.players["P1"].draw_pile = ["1-0-002"] + state.players["P1"].draw_pile
+        state.players["P1"].current_cp = 3
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertEqual(state.players["P1"].current_cp, 2)
+        self.assertIn("1-0-002", state.players["P1"].hand)
+
+    # ブロッカーを持つユニットはブロック時にBP+2000され、相討ちを耐えることを確認する。
+    def test_blocker_bonus_applies_before_combat_damage(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-045"] = CardDefinition(
+            card_no="1-0-045",
+            category="unit",
+            rarity="R",
+            color="green",
+            name="Leafia",
+            cp=3,
+            bp_by_level=(6, 7, 8),
+            abilities=(AbilityDefinition(name="ブロッカー", text=""),),
+            race="test",
+        )
+        state.card_catalog["1-0-300"] = CardDefinition(
+            card_no="1-0-300",
+            category="unit",
+            rarity="C",
+            color="red",
+            name="Six Power Attacker",
+            cp=1,
+            bp_by_level=(6, 6, 6),
+            abilities=(),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-300", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-045", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+        )
+
+        self.assertEqual(len(state.players["P2"].battlefield), 1)
+
+    # 破壊時誘発によりロストで相手手札を捨てさせ、インターセプトドローで1枚引くことを確認する。
+    def test_unit_destroyed_abilities_can_discard_opponent_and_draw_intercept(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-027"] = CardDefinition(
+            card_no="1-0-027",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Lost Unit",
+            cp=1,
+            bp_by_level=(1, 2, 3),
+            abilities=(AbilityDefinition(name="ロスト", text=""),),
+            race="test",
+        )
+        state.card_catalog["1-0-029"] = CardDefinition(
+            card_no="1-0-029",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Intercept Draw Unit",
+            cp=1,
+            bp_by_level=(1, 2, 3),
+            abilities=(AbilityDefinition(name="インターセプトドロー", text=""),),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-027", unit_id=1, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="1-0-029", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+        ]
+        state.players["P1"].draw_pile = ["1-0-061"] + state.players["P1"].draw_pile
+        state.players["P2"].hand = ["2-0-001", "2-0-002"]
+        state.players["P1"].battlefield[0].current_damage = 1000
+        state.players["P1"].battlefield[1].current_damage = 1000
+
+        from tojs.game import _destroy_broken_units
+
+        _destroy_broken_units(state, "P1", random.Random(7), None)
+
+        self.assertEqual(len(state.players["P2"].hand), 1)
+        self.assertIn("1-0-061", state.players["P1"].hand)
+
+    # 絶妙な挑発は相手ユニットのレベルを3にするが、OCによる回復は発生しないことを確認する。
+    def test_reactive_intercept_on_unit_entered_can_set_enemy_level_to_three(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-069"] = CardDefinition(
+            card_no="1-0-069",
+            category="intercept",
+            rarity="R",
+            color="none",
+            name="Taunt",
+            cp=0,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="絶妙な挑発", text=""),),
+            race="test",
+        )
+        state.players["P1"].trigger_zone = ["1-0-069"]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-001", unit_id=1, level=1, exhausted=True, attack_restricted=True)
+        ]
+
+        payload = build_reactive_intercept_choice_payload(state, "P1", "unit_entered")
+        action = next(choice for choice in payload["available_choices"] if choice.get("kind") == "use_intercept")
+        apply_reactive_intercept_action(state, "P1", action, "unit_entered")
+
+        self.assertEqual(state.players["P2"].battlefield[0].level, 3)
+        self.assertTrue(state.players["P2"].battlefield[0].exhausted)
+        self.assertTrue(state.players["P2"].battlefield[0].attack_restricted)
+
+    # ムーンセイヴァーは攻撃時にLv.2以上の相手ユニットを破壊できることを確認する。
+    def test_reactive_intercept_on_unit_attacked_can_destroy_level_two_or_higher_unit(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-031"] = CardDefinition(
+            card_no="1-0-031",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Blue Support Unit",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-089"] = CardDefinition(
+            card_no="1-0-089",
+            category="intercept",
+            rarity="R",
+            color="blue",
+            name="Moon Saver",
+            cp=1,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="ムーンセイヴァー", text=""),),
+            race="test",
+        )
+        state.players["P1"].trigger_zone = ["1-0-089"]
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-031", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].current_cp = 1
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="2-0-002", unit_id=3, level=2, exhausted=False, attack_restricted=False),
+        ]
+
+        payload = build_reactive_intercept_choice_payload(state, "P1", "unit_attacked")
+        action = next(choice for choice in payload["available_choices"] if choice.get("kind") == "use_intercept")
+        apply_reactive_intercept_action(state, "P1", action, "unit_attacked")
+
+        self.assertEqual(len(state.players["P2"].battlefield), 1)
+        self.assertEqual(state.players["P2"].battlefield[0].level, 1)
+
+    # ダーク・アーマーは自ユニットにBP+7000し、自分のライフを1減らすことを確認する。
+    def test_battle_intercept_dark_armor_adds_bp_and_costs_life(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-031"] = CardDefinition(
+            card_no="1-0-031",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Blue Support Unit",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-091"] = CardDefinition(
+            card_no="1-0-091",
+            category="intercept",
+            rarity="R",
+            color="blue",
+            name="Dark Armor",
+            cp=1,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="ダーク・アーマー", text=""),),
+            race="test",
+        )
+        state.players["P1"].trigger_zone = ["1-0-091"]
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-031", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].current_cp = 1
+        own_unit = state.players["P1"].battlefield[0]
+        enemy_unit = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+
+        apply_intercept_action(
+            state,
+            "P1",
+            {"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-091"},
+            own_unit,
+            enemy_unit,
+            True,
+        )
+
+        self.assertEqual(own_unit.temporary_bp_modifier, 7000)
+        self.assertEqual(state.players["P1"].life, 6)
+
+    # エクトプラズムは自分のユニット破壊時に相手ユニットを破壊できることを確認する。
+    def test_reactive_intercept_on_unit_destroyed_can_destroy_enemy_unit(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-031"] = CardDefinition(
+            card_no="1-0-031",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Blue Support Unit",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-092"] = CardDefinition(
+            card_no="1-0-092",
+            category="intercept",
+            rarity="R",
+            color="blue",
+            name="Ectoplasm",
+            cp=3,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="エクトプラズム", text=""),),
+            race="test",
+        )
+        state.players["P1"].trigger_zone = ["1-0-092"]
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-031", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P1"].current_cp = 3
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        payload = build_reactive_intercept_choice_payload(state, "P1", "unit_destroyed")
+        action = next(choice for choice in payload["available_choices"] if choice.get("kind") == "use_intercept")
+        apply_reactive_intercept_action(state, "P1", action, "unit_destroyed")
+
+        self.assertEqual(state.players["P2"].battlefield, [])
 
 
 if __name__ == "__main__":
