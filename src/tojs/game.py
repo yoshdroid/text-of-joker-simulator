@@ -63,6 +63,62 @@ class AbilityEvent:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class EventDefinition:
+    type: str
+    collection_mode: str = "source_only"
+    source_side_only: bool = False
+    source_first_turn_player: bool = False
+    source_first_non_turn_metadata_key: str | None = None
+    reactive_intercept_window: bool = False
+    battle_intercept_window: bool = False
+
+
+EVENT_DEFINITIONS: list[EventDefinition] = [
+    EventDefinition(type="turn_started", collection_mode="priority"),
+    EventDefinition(type="turn_start_draw", collection_mode="priority"),
+    EventDefinition(type="turn_start_cp_set", collection_mode="priority"),
+    EventDefinition(type="turn_end", collection_mode="priority"),
+    EventDefinition(
+        type="unit_entered",
+        collection_mode="priority",
+        source_side_only=True,
+        source_first_turn_player=True,
+        reactive_intercept_window=True,
+    ),
+    EventDefinition(
+        type="unit_attacked",
+        collection_mode="priority",
+        source_side_only=True,
+        source_first_turn_player=True,
+        reactive_intercept_window=True,
+    ),
+    EventDefinition(
+        type="battle_started",
+        collection_mode="priority",
+        source_first_turn_player=True,
+        source_first_non_turn_metadata_key="blocker_unit_id",
+        battle_intercept_window=True,
+    ),
+    EventDefinition(
+        type="player_attack_success",
+        collection_mode="priority",
+        source_side_only=True,
+    ),
+    EventDefinition(
+        type="unit_destroyed",
+        reactive_intercept_window=True,
+    ),
+    EventDefinition(type="unit_overclocked"),
+    EventDefinition(type="cards_drawn", collection_mode="priority"),
+    EventDefinition(type="cp_changed", collection_mode="priority"),
+    EventDefinition(type="life_changed", collection_mode="priority"),
+]
+
+
+EVENT_DEFINITION_BY_TYPE = {definition.type: definition for definition in EVENT_DEFINITIONS}
+
+
 def create_match_state(
     regulation: Regulation,
     card_catalog: dict[str, CardDefinition],
@@ -1370,21 +1426,10 @@ def _ability_owner_id(event: AbilityEvent, triggered_ability: dict[str, Any]) ->
 
 
 def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    definition = get_event_definition(event.type)
     if event.type == "unit_destroyed" and event.source_card_no is not None:
         return _collect_destroyed_triggered_abilities(state, event)
-    if event.type in {
-        "unit_entered",
-        "unit_attacked",
-        "battle_started",
-        "player_attack_success",
-        "turn_started",
-        "turn_end",
-        "turn_start_draw",
-        "turn_start_cp_set",
-        "cards_drawn",
-        "cp_changed",
-        "life_changed",
-    }:
+    if definition.collection_mode == "priority":
         return _collect_priority_triggered_abilities(state, event)
     return _collect_source_only_triggered_abilities(state, event)
 
@@ -1439,22 +1484,21 @@ def _collect_priority_unit_abilities_for_side(
     event: AbilityEvent,
     player_id: PlayerId,
 ) -> list[dict[str, Any]]:
-    if event.type in {"unit_entered", "unit_attacked", "player_attack_success"} and player_id != event.player_id:
+    definition = get_event_definition(event.type)
+    if definition.source_side_only and player_id != event.player_id:
         return []
     player = state.players[player_id]
     source_first_unit_id: int | None = None
-    if event.type == "unit_entered" and player_id == event.player_id:
+    if definition.source_first_turn_player and player_id == state.turn_player_id:
         source_first_unit_id = event.source_unit_id
-    elif event.type == "unit_attacked" and player_id == state.turn_player_id:
-        source_first_unit_id = event.source_unit_id
-    elif event.type == "battle_started":
-        if player_id == state.turn_player_id:
-            source_first_unit_id = event.source_unit_id
-        else:
-            metadata = event.metadata if isinstance(event.metadata, dict) else {}
-            blocker_unit_id = metadata.get("blocker_unit_id")
-            if isinstance(blocker_unit_id, int):
-                source_first_unit_id = blocker_unit_id
+    elif (
+        definition.source_first_non_turn_metadata_key is not None
+        and player_id != state.turn_player_id
+    ):
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        source_first_value = metadata.get(definition.source_first_non_turn_metadata_key)
+        if isinstance(source_first_value, int):
+            source_first_unit_id = source_first_value
 
     prioritized_units: list[UnitState] = []
     remaining_units: list[UnitState] = []
@@ -1486,7 +1530,8 @@ def _collect_priority_trigger_abilities_for_side(
     event: AbilityEvent,
     player_id: PlayerId,
 ) -> list[dict[str, Any]]:
-    if event.type in {"unit_entered", "unit_attacked", "player_attack_success"} and player_id != event.player_id:
+    definition = get_event_definition(event.type)
+    if definition.source_side_only and player_id != event.player_id:
         return []
     player = state.players[player_id]
     triggered: list[dict[str, Any]] = []
@@ -1522,11 +1567,15 @@ def _interleave_priority_bands(
 
 
 def _supports_priority_reactive_intercepts(event: AbilityEvent) -> bool:
-    return event.type in {"unit_entered", "unit_attacked", "unit_destroyed"}
+    return get_event_definition(event.type).reactive_intercept_window
 
 
 def _supports_priority_battle_intercepts(event: AbilityEvent) -> bool:
-    return event.type == "battle_started"
+    return get_event_definition(event.type).battle_intercept_window
+
+
+def get_event_definition(event_type: str) -> EventDefinition:
+    return EVENT_DEFINITION_BY_TYPE.get(event_type, EventDefinition(type=event_type))
 
 
 def _resolve_priority_reactive_intercepts(
