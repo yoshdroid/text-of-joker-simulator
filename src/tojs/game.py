@@ -910,6 +910,15 @@ def apply_intercept_action(
     player.current_cp -= card.cp or 0
     used_card_no = player.trigger_zone.pop(trigger_index)
     player.discard_pile.insert(0, used_card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="intercept_used",
+            player_id=player_id,
+            target_player_id=player_id,
+            source_card_no=used_card_no,
+        ),
+    )
     _resolve_intercept_effect(state, player_id, card_no, own_unit, enemy_unit, own_unit_is_attacker)
     _record_card_use(state, card_no)
 
@@ -1326,10 +1335,28 @@ def _consume_trigger_card(
         if player.trigger_zone[source_index] == card_no:
             used_card_no = player.trigger_zone.pop(source_index)
             player.discard_pile.insert(0, used_card_no)
+            _record_ability_event(
+                state,
+                AbilityEvent(
+                    type="trigger_used",
+                    player_id=player_id,
+                    target_player_id=player_id,
+                    source_card_no=used_card_no,
+                ),
+            )
             return True
     if card_no in player.trigger_zone:
         player.trigger_zone.remove(card_no)
         player.discard_pile.insert(0, card_no)
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="trigger_used",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=card_no,
+            ),
+        )
         return True
     return False
 
@@ -1580,6 +1607,15 @@ def apply_reactive_intercept_action(
     player.current_cp -= card.cp or 0
     used_card_no = player.trigger_zone.pop(trigger_index)
     player.discard_pile.insert(0, used_card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="intercept_used",
+            player_id=player_id,
+            target_player_id=player_id,
+            source_card_no=used_card_no,
+        ),
+    )
     _resolve_reactive_intercept_effect(state, player_id, action, event_type, rng, choice_resolver)
     _record_card_use(state, card_no)
 

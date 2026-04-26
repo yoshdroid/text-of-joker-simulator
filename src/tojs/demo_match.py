@@ -109,10 +109,10 @@ def _render_trace_log(
 ) -> list[str]:
     rendered: list[str] = []
     latest_round_no = 0
-    previous_private_states: dict[str, dict[str, Any]] = {}
     request_rounds: dict[str, int] = {}
     game_event_cursor = 0
     safe_game_events = [event for event in (game_events or []) if isinstance(event, dict)]
+    previous_shared_state: dict[str, Any] | None = None
 
     for entry in trace_log:
         message = entry.get("message", {})
@@ -128,37 +128,32 @@ def _render_trace_log(
         actor = str(entry.get("player_id", "SYS"))
         direction = "REQ" if entry.get("direction") == "to_player" else "RES"
 
-        if (
-            direction == "REQ"
-            and message.get("type") == "state_update"
-            and isinstance(payload, dict)
-            and payload.get("viewer_player_id") == actor
-        ):
+        if direction == "REQ" and message.get("type") == "state_update" and isinstance(payload, dict):
             event_log_count = payload.get("event_log_count")
             if isinstance(event_log_count, int):
-                rendered.extend(
-                    _render_game_events_slice(
-                        safe_game_events,
-                        game_event_cursor,
-                        event_log_count,
-                        card_catalog,
-                    )
-                )
+                rendered.extend(_render_game_events_slice(safe_game_events, game_event_cursor, event_log_count, card_catalog))
                 game_event_cursor = max(game_event_cursor, event_log_count)
 
         if show_reqres:
             details = _render_message_details(message, card_catalog)
             rendered.append(render_event_log(round_no, actor, direction, details))
 
-        if (
-            direction == "REQ"
-            and message.get("type") == "state_update"
-            and isinstance(payload, dict)
-            and payload.get("viewer_player_id") == actor
-        ):
-            previous_state = previous_private_states.get(actor)
-            rendered.extend(_render_state_diff_events(round_no, actor, previous_state, payload, card_catalog))
-            previous_private_states[actor] = payload
+        action_event = _render_system_event_from_message(
+            round_no,
+            actor,
+            direction,
+            message,
+            card_catalog,
+            previous_shared_state,
+        )
+        if action_event is not None:
+            rendered.append(action_event)
+
+        if direction == "REQ" and message.get("type") == "state_update" and isinstance(payload, dict):
+            current_shared_state = _build_shared_state_snapshot(payload)
+            if current_shared_state is not None:
+                rendered.extend(_render_state_diff_events(round_no, previous_shared_state, current_shared_state))
+                previous_shared_state = current_shared_state
 
     rendered.extend(_render_game_events_slice(safe_game_events, game_event_cursor, len(safe_game_events), card_catalog))
     return _attach_round_event_numbers(rendered)
@@ -228,6 +223,10 @@ def _render_action_message(message_type: str, payload: dict[str, Any], card_cata
         return f"{message_type} {card_name}を撤退させる"
     if kind == "attack":
         return f"{message_type} attack attacker_index={payload.get('attacker_index')}"
+    if kind == "block":
+        return f"{message_type} block blocker_index={payload.get('blocker_index')}"
+    if kind == "use_intercept" and card_name:
+        return f"{message_type} {card_name}を使用"
     return f"{message_type} {_format_choice(payload)}"
 
 
@@ -288,10 +287,8 @@ def _render_battlefield_summary(battlefield: object) -> str:
 
 def _render_state_diff_events(
     round_no: int,
-    viewer_id: str,
     previous_state: dict[str, Any] | None,
     current_state: dict[str, Any],
-    card_catalog: dict[str, Any],
 ) -> list[str]:
     if previous_state is None:
         return []
@@ -302,20 +299,12 @@ def _render_state_diff_events(
     if not isinstance(current_players, dict) or not isinstance(previous_players, dict):
         return []
 
-    current_view = current_players.get(viewer_id, {})
-    previous_view = previous_players.get(viewer_id, {})
-    if not isinstance(current_view, dict) or not isinstance(previous_view, dict):
-        return []
-
-    rendered.extend(_render_life_diff(round_no, viewer_id, previous_players, current_players))
-    rendered.extend(_render_drive_diff(round_no, viewer_id, previous_view, current_view, card_catalog))
-    rendered.extend(_render_trigger_set_diff(round_no, viewer_id, previous_view, current_view, card_catalog))
+    rendered.extend(_render_life_diff(round_no, previous_players, current_players))
     return rendered
 
 
 def _render_life_diff(
     round_no: int,
-    viewer_id: str,
     previous_players: dict[str, Any],
     current_players: dict[str, Any],
 ) -> list[str]:
@@ -329,63 +318,7 @@ def _render_life_diff(
         current_life = current_player.get("life")
         if isinstance(previous_life, int) and isinstance(current_life, int) and previous_life != current_life:
             delta = current_life - previous_life
-            rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{player_id}のライフが{current_life}になった ({delta:+d})"))
-    return rendered
-
-
-def _render_drive_diff(
-    round_no: int,
-    viewer_id: str,
-    previous_view: dict[str, Any],
-    current_view: dict[str, Any],
-    card_catalog: dict[str, Any],
-) -> list[str]:
-    previous_units = previous_view.get("battlefield", [])
-    current_units = current_view.get("battlefield", [])
-    if not isinstance(previous_units, list) or not isinstance(current_units, list):
-        return []
-    previous_keys = {(unit.get("card_no"), unit.get("level")) for unit in previous_units if isinstance(unit, dict)}
-    rendered: list[str] = []
-    for unit in current_units:
-        if not isinstance(unit, dict):
-            continue
-        key = (unit.get("card_no"), unit.get("level"))
-        if key in previous_keys:
-            continue
-        card_name = _lookup_card_name(unit.get("card_no"), card_catalog)
-        if card_name:
-            rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{viewer_id}が{card_name}をユニットドライブ"))
-    return rendered
-
-
-def _render_trigger_set_diff(
-    round_no: int,
-    viewer_id: str,
-    previous_view: dict[str, Any],
-    current_view: dict[str, Any],
-    card_catalog: dict[str, Any],
-) -> list[str]:
-    previous_zone = previous_view.get("trigger_zone", [])
-    current_zone = current_view.get("trigger_zone", [])
-    if not isinstance(previous_zone, list) or not isinstance(current_zone, list):
-        return []
-    previous_cards = [
-        item.get("card_no")
-        for item in previous_zone
-        if isinstance(item, dict) and isinstance(item.get("card_no"), str)
-    ]
-    current_cards = [
-        item.get("card_no")
-        for item in current_zone
-        if isinstance(item, dict) and isinstance(item.get("card_no"), str)
-    ]
-    if len(current_cards) <= len(previous_cards):
-        return []
-    rendered: list[str] = []
-    for card_no in current_cards[len(previous_cards):]:
-        card_name = _lookup_card_name(card_no, card_catalog)
-        if card_name:
-            rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{viewer_id}がトリガーゾーンに{card_name}をセット"))
+            rendered.append(render_event_log(round_no, "SYS", "EVT", f"{player_id}のライフが{current_life}になった ({delta:+d})"))
     return rendered
 
 
@@ -401,9 +334,32 @@ def _render_game_events_slice(
         if not detail:
             continue
         round_no = int(event.get("round_no", 0) or 0)
-        actor = str(event.get("player_id") or "SYS")
-        rendered.append(render_event_log(round_no, actor, "EVT", detail))
+        rendered.append(render_event_log(round_no, "SYS", "EVT", detail))
     return rendered
+
+
+def _build_shared_state_snapshot(payload: dict[str, Any]) -> dict[str, Any] | None:
+    players = payload.get("players", {})
+    if not isinstance(players, dict):
+        return None
+    snapshot_players: dict[str, Any] = {}
+    for player_id, player_view in players.items():
+        if not isinstance(player_view, dict):
+            continue
+        snapshot_players[str(player_id)] = {
+            "life": player_view.get("life"),
+            "current_cp": player_view.get("current_cp"),
+            "hand_count": player_view.get("hand_count"),
+            "deck_count": player_view.get("deck_count"),
+            "battlefield": player_view.get("battlefield"),
+            "trigger_zone": player_view.get("trigger_zone"),
+        }
+    return {
+        "round_no": payload.get("round_no"),
+        "turn_serial": payload.get("turn_serial"),
+        "turn_player_id": payload.get("turn_player_id"),
+        "players": snapshot_players,
+    }
 
 
 def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any]) -> str | None:
@@ -420,6 +376,10 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
     if event_type == "turn_end":
         return f"{player_id}のターン終了"
+    if event_type == "trigger_used" and source_card_name:
+        return f"{player_id}のトリガー {source_card_name} が発動"
+    if event_type == "intercept_used" and source_card_name:
+        return f"{player_id}が{source_card_name}をインターセプト使用"
     if event_type == "cards_drawn" and isinstance(amount, int):
         if source_card_name:
             return f"{source_card_name}の効果で{player_id}が{amount}枚ドロー"
@@ -468,6 +428,72 @@ def _extract_round_no_from_rendered_line(line: str) -> int | None:
     if not round_text.isdigit():
         return None
     return int(round_text)
+
+
+def _render_system_event_from_message(
+    round_no: int,
+    actor: str,
+    direction: str,
+    message: dict[str, object],
+    card_catalog: dict[str, Any],
+    shared_state: dict[str, Any] | None,
+) -> str | None:
+    if direction != "RES":
+        return None
+    message_type = str(message.get("type", ""))
+    payload = message.get("payload", {})
+    if not isinstance(payload, dict):
+        return None
+    if message_type not in {"action", "choice_response"}:
+        return None
+    kind = str(payload.get("kind", ""))
+    card_name = _get_action_card_name(payload, card_catalog)
+    if kind == "drive" and card_name:
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をユニットドライブ")
+    if kind == "set_trigger" and card_name:
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}がトリガーゾーンに{card_name}をセット")
+    if kind == "overdrive" and card_name:
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}でオーバードライブ")
+    if kind == "override" and card_name:
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をオーバーライド")
+    if kind == "retreat" and card_name:
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}を撤退させる")
+    if kind == "attack":
+        attacker_name = _lookup_battlefield_card_name(shared_state, actor, payload.get("attacker_index"), card_catalog)
+        if attacker_name:
+            return render_event_log(round_no, "SYS", "EVT", f"{actor}が{attacker_name}でアタックを宣言")
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}がアタックを宣言")
+    if kind == "block":
+        blocker_name = _lookup_battlefield_card_name(shared_state, actor, payload.get("blocker_index"), card_catalog)
+        if blocker_name:
+            return render_event_log(round_no, "SYS", "EVT", f"{actor}が{blocker_name}でブロックを宣言")
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}がブロックを宣言")
+    if kind == "use_intercept" and card_name:
+        return render_event_log(round_no, "SYS", "EVT", f"{actor}が{card_name}をインターセプト使用")
+    return None
+
+
+def _lookup_battlefield_card_name(
+    shared_state: dict[str, Any] | None,
+    player_id: str,
+    unit_index: object,
+    card_catalog: dict[str, Any],
+) -> str | None:
+    if shared_state is None or not isinstance(unit_index, int):
+        return None
+    players = shared_state.get("players", {})
+    if not isinstance(players, dict):
+        return None
+    player_view = players.get(player_id, {})
+    if not isinstance(player_view, dict):
+        return None
+    battlefield = player_view.get("battlefield", [])
+    if not isinstance(battlefield, list) or unit_index < 0 or unit_index >= len(battlefield):
+        return None
+    unit = battlefield[unit_index]
+    if not isinstance(unit, dict):
+        return None
+    return _lookup_card_name(unit.get("card_no"), card_catalog)
 
 
 if __name__ == "__main__":

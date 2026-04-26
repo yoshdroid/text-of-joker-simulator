@@ -176,6 +176,8 @@ class DemoMatchTest(unittest.TestCase):
         self.assertIn("ターン開始時に2枚ドロー", rendered[0])
         self.assertIn("ターン開始時にCPを変動 +1", rendered[1])
         self.assertIn("[REQ] state_update", rendered[2])
+        self.assertIn("[SYS][EVT]", rendered[0])
+        self.assertIn("[SYS][EVT]", rendered[1])
 
     # show_reqres=FalseのときはREQ/RES行が省かれることを確認する
     def test_render_trace_log_can_hide_reqres(self) -> None:
@@ -206,6 +208,172 @@ class DemoMatchTest(unittest.TestCase):
         )
 
         self.assertEqual(rendered, [])
+
+    # 同一盤面のstate_updateが複数プレイヤーへ送られてもEVTは一度だけ表示されることを確認する
+    def test_render_trace_log_deduplicates_shared_state_events(self) -> None:
+        rendered = _render_trace_log(
+            [
+                {
+                    "direction": "to_player",
+                    "player_id": "P1",
+                    "message": {
+                        "type": "state_update",
+                        "request_id": "state-3-P1",
+                        "payload": {
+                            "round_no": 3,
+                            "turn_serial": 5,
+                            "event_log_count": 0,
+                            "viewer_player_id": "P1",
+                            "turn_player_id": "P1",
+                            "players": {
+                                "P1": {"life": 7, "current_cp": 3, "hand_count": 4, "deck_count": 36, "battlefield": [], "trigger_zone": []},
+                                "P2": {"life": 7, "current_cp": 3, "hand_count": 4, "deck_count": 36, "battlefield": [], "trigger_zone": []},
+                            },
+                        },
+                    },
+                },
+                {
+                    "direction": "to_player",
+                    "player_id": "P1",
+                    "message": {
+                        "type": "state_update",
+                        "request_id": "state-3b-P1",
+                        "payload": {
+                            "round_no": 3,
+                            "turn_serial": 5,
+                            "event_log_count": 0,
+                            "viewer_player_id": "P1",
+                            "turn_player_id": "P1",
+                            "players": {
+                                "P1": {"life": 7, "current_cp": 3, "hand_count": 4, "deck_count": 36, "battlefield": [], "trigger_zone": []},
+                                "P2": {"life": 6, "current_cp": 3, "hand_count": 4, "deck_count": 36, "battlefield": [], "trigger_zone": []},
+                            },
+                        },
+                    },
+                },
+                {
+                    "direction": "to_player",
+                    "player_id": "P2",
+                    "message": {
+                        "type": "state_update",
+                        "request_id": "state-3-P2",
+                        "payload": {
+                            "round_no": 3,
+                            "turn_serial": 5,
+                            "event_log_count": 0,
+                            "viewer_player_id": "P2",
+                            "turn_player_id": "P1",
+                            "players": {
+                                "P1": {"life": 7, "current_cp": 3, "hand_count": 4, "deck_count": 36, "battlefield": [], "trigger_zone": []},
+                                "P2": {"life": 6, "current_cp": 3, "hand_count": 4, "deck_count": 36, "battlefield": [], "trigger_zone": []},
+                            },
+                        },
+                    },
+                },
+            ],
+            {},
+            [],
+            show_reqres=False,
+        )
+
+        life_lines = [line for line in rendered if "P2のライフが6になった" in line]
+        self.assertEqual(len(life_lines), 1)
+        self.assertIn("[SYS][EVT]", life_lines[0])
+
+    # アタック宣言とブロック宣言は選択ユニットのカード名つきで表示されることを確認する
+    def test_render_trace_log_renders_attack_and_block_with_card_names(self) -> None:
+        rendered = _render_trace_log(
+            [
+                {
+                    "direction": "to_player",
+                    "player_id": "P1",
+                    "message": {
+                        "type": "state_update",
+                        "request_id": "state-3-P1",
+                        "payload": {
+                            "round_no": 3,
+                            "turn_serial": 5,
+                            "event_log_count": 0,
+                            "viewer_player_id": "P1",
+                            "turn_player_id": "P1",
+                            "players": {
+                                "P1": {
+                                    "life": 7,
+                                    "current_cp": 3,
+                                    "hand_count": 4,
+                                    "deck_count": 36,
+                                    "battlefield": [{"card_no": "1-0-004", "level": 1, "current_bp": 4000}],
+                                    "trigger_zone": [],
+                                },
+                                "P2": {
+                                    "life": 7,
+                                    "current_cp": 3,
+                                    "hand_count": 4,
+                                    "deck_count": 36,
+                                    "battlefield": [{"card_no": "1-0-031", "level": 1, "current_bp": 3000}],
+                                    "trigger_zone": [],
+                                },
+                            },
+                        },
+                    },
+                },
+                {
+                    "direction": "from_player",
+                    "player_id": "P1",
+                    "message": {
+                        "type": "action",
+                        "request_id": "action-3-5-P1",
+                        "payload": {"kind": "attack", "attacker_index": 0, "target": "player"},
+                    },
+                },
+                {
+                    "direction": "from_player",
+                    "player_id": "P2",
+                    "message": {
+                        "type": "choice_response",
+                        "request_id": "choice-3-5-1-P2",
+                        "payload": {"kind": "block", "blocker_index": 0},
+                    },
+                },
+            ],
+            {
+                "1-0-004": type("Card", (), {"name": "ランサー"})(),
+                "1-0-031": type("Card", (), {"name": "冥札再臨"})(),
+            },
+            [],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("P1がランサーでアタックを宣言" in line for line in rendered))
+        self.assertTrue(any("P2が冥札再臨でブロックを宣言" in line for line in rendered))
+
+    # トリガー発動とインターセプト使用もカード名つきで表示されることを確認する
+    def test_render_trace_log_renders_trigger_and_intercept_with_card_names(self) -> None:
+        rendered = _render_trace_log(
+            [
+                {
+                    "direction": "from_player",
+                    "player_id": "P2",
+                    "message": {
+                        "type": "choice_response",
+                        "request_id": "choice-3-5-1-P2",
+                        "payload": {"kind": "use_intercept", "card_no": "1-0-091", "trigger_index": 0},
+                    },
+                },
+            ],
+            {
+                "1-0-091": type("Card", (), {"name": "ダーク・アーマー"})(),
+                "1-0-061": type("Card", (), {"name": "不可侵防壁"})(),
+            },
+            [
+                {"round_no": 3, "player_id": "P1", "type": "trigger_used", "source_card_no": "1-0-061"},
+                {"round_no": 3, "player_id": "P2", "type": "intercept_used", "source_card_no": "1-0-091"},
+            ],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("P1のトリガー 不可侵防壁 が発動" in line for line in rendered))
+        self.assertTrue(any("P2がダーク・アーマーをインターセプト使用" in line for line in rendered))
 
 
 if __name__ == "__main__":
