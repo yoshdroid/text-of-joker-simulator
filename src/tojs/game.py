@@ -1777,8 +1777,10 @@ def resolve_triggered_ability(
         event.type,
     )
     owner_id = _ability_owner_id(event, triggered_ability)
-    _record_unit_ability_trigger_event(state, event, triggered_ability, owner_id)
     keyword_name = triggered_ability.get("keyword_name")
+    if keyword_name == "不屈" and owner_id != event.player_id:
+        return []
+    _record_unit_ability_trigger_event(state, event, triggered_ability, owner_id)
     if keyword_name == "不屈":
         return _resolve_untiring(state, event, triggered_ability, rng, choice_resolver)
     resolver = ABILITY_REGISTRY.get(key)
@@ -3273,8 +3275,6 @@ ABILITY_REGISTRY: dict[tuple[str, str], Any] = {
     ("1-0-045", "battle_started"): _resolve_blocker_bonus,
     ("1-0-027", "unit_destroyed"): _resolve_lost_on_destroy,
     ("1-0-029", "unit_destroyed"): _resolve_intercept_draw_on_destroy,
-    ("1-0-044", "turn_end"): _resolve_untiring,
-    ("1-0-048", "turn_end"): _resolve_untiring,
 }
 
 def parse_hand_card_id(hand_card_id: str) -> tuple[str, int]:

@@ -1545,10 +1545,41 @@ class GameStateTest(unittest.TestCase):
         apply_action(state, "P1", {"kind": "end_turn"}, random.Random(7))
 
         self.assertFalse(state.players["P1"].battlefield[0].exhausted)
+        ability_triggered_events = [event for event in state.event_log if event["type"] == "ability_triggered"]
+        self.assertEqual(len(ability_triggered_events), 1)
         action_recovered_event = next(event for event in state.event_log if event["type"] == "unit_action_recovered")
         self.assertEqual(action_recovered_event["player_id"], "P1")
         self.assertEqual(action_recovered_event["source_card_no"], "1-0-021")
         self.assertEqual(action_recovered_event["metadata"]["reason"], "untiring")
+
+    # 不屈は相手ターン終了時には発動せず、能力発動イベントも記録されないことを確認する。
+    def test_untiring_does_not_trigger_on_opponent_turn_end(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-021"] = CardDefinition(
+            card_no="1-0-021",
+            category="unit",
+            rarity="R",
+            color="yellow",
+            name="Untiring Unit",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(AbilityDefinition(name="不屈", text=""),),
+            race="test",
+        )
+        state.turn_player_id = "P2"
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-021", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        ]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="turn_end", player_id="P2")],
+            random.Random(7),
+        )
+
+        self.assertTrue(state.players["P1"].battlefield[0].exhausted)
+        self.assertEqual([event for event in state.event_log if event["type"] == "ability_triggered"], [])
+        self.assertEqual([event for event in state.event_log if event["type"] == "unit_action_recovered"], [])
 
     def test_start_turn_recovers_exhausted_unit_and_records_event(self) -> None:
         state = self.create_state()
