@@ -257,6 +257,10 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.turn_serial, 1)
         self.assertEqual(len(state.players["P1"].hand), 4)
         self.assertEqual(state.players["P1"].current_cp, 2)
+        self.assertEqual(state.event_log[0]["type"], "turn_start_draw")
+        self.assertEqual(state.event_log[0]["amount"], 0)
+        self.assertEqual(state.event_log[1]["type"], "turn_start_cp_set")
+        self.assertEqual(state.event_log[1]["amount"], 2)
 
     # state_update では自分の手札は見えるが、相手の手札内容は見えないことを確認する。
     def test_build_state_update_payload_hides_opponent_hand(self) -> None:
@@ -487,6 +491,7 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(state.players["P1"].battlefield[0].card_no, "1-0-040")
         self.assertEqual(state.players["P1"].hand, ["1-0-003"])
+        self.assertTrue(any(event["type"] == "cards_drawn" and event["source_card_no"] == "1-0-040" for event in state.event_log))
 
     # 何でも屋の陳列台を trigger_zone に置いた時、自分のユニット登場で 1 枚ドローすることを確認する。
     def test_trigger_zone_field_enter_ability_draws_card(self) -> None:

@@ -48,6 +48,8 @@ class MatchState:
     winner: str | None = None
     ended_reason: str | None = None
     used_card_nos_this_turn: list[str] = field(default_factory=list)
+    event_log: list[dict[str, Any]] = field(default_factory=list)
+    next_event_no: int = 1
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class AbilityEvent:
     source_unit_id: int | None = None
     target_player_id: PlayerId | None = None
     source_card_no: str | None = None
+    amount: int | None = None
 
 
 def create_match_state(
@@ -111,8 +114,27 @@ def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> No
     player = state.players[player_id]
     draw_count = get_scheduled_draw_count(state, player)
     cp_value = get_scheduled_cp(state, player)
-    draw_cards(player, draw_count, rng, state.regulation.hand_size_limit)
+    actual_draw = draw_cards(player, draw_count, rng, state.regulation.hand_size_limit)
+    resolve_ability_events(
+        state,
+        [
+            AbilityEvent(type="turn_start_draw", player_id=player_id, amount=actual_draw),
+        ],
+        rng,
+    )
+    previous_cp = player.current_cp
     player.current_cp = min(cp_value, state.regulation.max_cp_per_round)
+    resolve_ability_events(
+        state,
+        [
+            AbilityEvent(
+                type="turn_start_cp_set",
+                player_id=player_id,
+                amount=player.current_cp - previous_cp,
+            ),
+        ],
+        rng,
+    )
     for unit in player.battlefield:
         if unit.level >= 1:
             unit.exhausted = False
@@ -190,6 +212,7 @@ def build_state_update_payload(state: MatchState, viewer_id: PlayerId) -> dict[s
         "round_no": state.round_no,
         "turn_player_id": state.turn_player_id,
         "turn_serial": state.turn_serial,
+        "event_log_count": len(state.event_log),
         "viewer_player_id": viewer_id,
         "available_actions": available_actions,
         "players": {
@@ -203,15 +226,16 @@ def build_state_update_payload(state: MatchState, viewer_id: PlayerId) -> dict[s
     }
 
 
-def draw_cards(player: PlayerState, count: int, rng: random.Random, hand_limit: int) -> None:
+def draw_cards(player: PlayerState, count: int, rng: random.Random, hand_limit: int) -> int:
     if count <= 0 or len(player.hand) >= hand_limit:
-        return
+        return 0
     actual_count = min(count, hand_limit - len(player.hand))
     if len(player.draw_pile) < actual_count:
         _rebuild_draw_pile(player, rng)
     drawn = player.draw_pile[:actual_count]
     del player.draw_pile[:actual_count]
     player.hand.extend(drawn)
+    return len(drawn)
 
 
 def _rebuild_draw_pile(player: PlayerState, rng: random.Random) -> None:
@@ -921,10 +945,28 @@ def resolve_ability_events(
     pending_events = list(initial_events)
     while pending_events:
         event = pending_events.pop(0)
+        _record_ability_event(state, event)
         triggered = collect_triggered_abilities(state, event)
         for triggered_ability in triggered:
             emitted = resolve_triggered_ability(state, event, triggered_ability, rng, choice_resolver)
             pending_events.extend(emitted)
+
+
+def _record_ability_event(state: MatchState, event: AbilityEvent) -> None:
+    state.event_log.append(
+        {
+            "event_no": state.next_event_no,
+            "round_no": state.round_no,
+            "turn_serial": state.turn_serial,
+            "type": event.type,
+            "player_id": event.player_id,
+            "target_player_id": event.target_player_id,
+            "source_unit_id": event.source_unit_id,
+            "source_card_no": event.source_card_no,
+            "amount": event.amount,
+        }
+    )
+    state.next_event_no += 1
 
 
 def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
@@ -960,7 +1002,7 @@ def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[
                 )
             )
 
-    if event.type == "turn_end":
+    if event.type in {"turn_end", "turn_start_draw", "turn_start_cp_set", "cards_drawn", "cp_changed", "life_changed"}:
         for unit in owner.battlefield:
             if unit.unit_id == 0:
                 unit.unit_id = _allocate_unit_id(state)
@@ -1549,8 +1591,18 @@ def _resolve_happaloid_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
-    return []
+    drawn = draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    if drawn <= 0:
+        return []
+    return [
+        AbilityEvent(
+            type="cards_drawn",
+            player_id=event.player_id,
+            target_player_id=event.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=drawn,
+        )
+    ]
 
 
 def _resolve_ririmu_enter(
@@ -1676,7 +1728,15 @@ def _resolve_goliath_overclock(
     opponent = state.players[get_opponent_id(event.player_id)]
     opponent.life -= 1
     _update_winner_by_life(state)
-    return []
+    return [
+        AbilityEvent(
+            type="life_changed",
+            player_id=opponent.player_id,
+            target_player_id=opponent.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=-1,
+        )
+    ]
 
 
 def _resolve_draw_trigger_cards(
@@ -1690,8 +1750,18 @@ def _resolve_draw_trigger_cards(
         return []
     if not _consume_trigger_card(state, event.player_id, triggered_ability):
         return []
-    _draw_cards_by_category(state, event.player_id, "trigger", 2)
-    return []
+    drawn = _draw_cards_by_category(state, event.player_id, "trigger", 2)
+    if drawn <= 0:
+        return []
+    return [
+        AbilityEvent(
+            type="cards_drawn",
+            player_id=event.player_id,
+            target_player_id=event.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=drawn,
+        )
+    ]
 
 
 def _resolve_draw_intercept_card(
@@ -1705,8 +1775,18 @@ def _resolve_draw_intercept_card(
         return []
     if not _consume_trigger_card(state, event.player_id, triggered_ability):
         return []
-    _draw_cards_by_category(state, event.player_id, "intercept", 1)
-    return []
+    drawn = _draw_cards_by_category(state, event.player_id, "intercept", 1)
+    if drawn <= 0:
+        return []
+    return [
+        AbilityEvent(
+            type="cards_drawn",
+            player_id=event.player_id,
+            target_player_id=event.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=drawn,
+        )
+    ]
 
 
 def _resolve_draw_any_card(
@@ -1720,8 +1800,18 @@ def _resolve_draw_any_card(
         return []
     if not _consume_trigger_card(state, event.player_id, triggered_ability):
         return []
-    draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
-    return []
+    drawn = draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    if drawn <= 0:
+        return []
+    return [
+        AbilityEvent(
+            type="cards_drawn",
+            player_id=event.player_id,
+            target_player_id=event.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=drawn,
+        )
+    ]
 
 
 def _resolve_untiring(
@@ -1804,8 +1894,20 @@ def _resolve_charge_enter(
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
     player = state.players[event.player_id]
+    previous_cp = player.current_cp
     player.current_cp = min(player.current_cp + 2, state.regulation.max_cp_per_round)
-    return []
+    gained = player.current_cp - previous_cp
+    if gained <= 0:
+        return []
+    return [
+        AbilityEvent(
+            type="cp_changed",
+            player_id=event.player_id,
+            target_player_id=event.player_id,
+            source_card_no=triggered_ability["card_no"],
+            amount=gained,
+        )
+    ]
 
 
 def _resolve_grind_draw_enter(
@@ -1823,7 +1925,17 @@ def _resolve_grind_draw_enter(
             continue
         used_card = state.card_catalog[used_card_no]
         if _normalize_color(used_card.color) == "green" and (used_card.cp or 0) >= 2:
-            draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+            drawn = draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+            if drawn > 0:
+                return [
+                    AbilityEvent(
+                        type="cards_drawn",
+                        player_id=event.player_id,
+                        target_player_id=event.player_id,
+                        source_card_no=triggered_ability["card_no"],
+                        amount=drawn,
+                    )
+                ]
             break
     return []
 
@@ -1835,9 +1947,10 @@ def _resolve_grind_beetle_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    _resolve_charge_enter(state, event, triggered_ability, rng, choice_resolver)
-    _resolve_grind_draw_enter(state, event, triggered_ability, rng, choice_resolver)
-    return []
+    emitted: list[AbilityEvent] = []
+    emitted.extend(_resolve_charge_enter(state, event, triggered_ability, rng, choice_resolver))
+    emitted.extend(_resolve_grind_draw_enter(state, event, triggered_ability, rng, choice_resolver))
+    return emitted
 
 
 def _resolve_blocker_bonus(

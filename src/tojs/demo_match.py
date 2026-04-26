@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deck2", default="configs/decks/example_deck.json", help="Path to second player's deck json")
     parser.add_argument("--cycles", type=int, default=2, help="Number of action cycles to execute after bootstrap")
     parser.add_argument("--seed", type=int, default=7, help="Random seed")
+    parser.add_argument("--hide-reqres", action="store_true", help="Hide REQ/RES transport log lines from rendered_messages")
     return parser
 
 
@@ -58,7 +59,13 @@ def main() -> int:
                     "status": "ok",
                     "snapshots": snapshots,
                     "messages": trace_log,
-                    "rendered_messages": _render_trace_log(trace_log, card_catalog),
+                    "game_events": result.match_state.event_log,
+                    "rendered_messages": _render_trace_log(
+                        trace_log,
+                        card_catalog,
+                        result.match_state.event_log,
+                        show_reqres=not args.hide_reqres,
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -94,11 +101,18 @@ def _build_snapshot(label: str, state: object) -> dict[str, object]:
     }
 
 
-def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str, Any]) -> list[str]:
+def _render_trace_log(
+    trace_log: list[dict[str, object]],
+    card_catalog: dict[str, Any],
+    game_events: list[dict[str, Any]] | None = None,
+    show_reqres: bool = True,
+) -> list[str]:
     rendered: list[str] = []
     latest_round_no = 0
     previous_private_states: dict[str, dict[str, Any]] = {}
     request_rounds: dict[str, int] = {}
+    game_event_cursor = 0
+    safe_game_events = [event for event in (game_events or []) if isinstance(event, dict)]
 
     for entry in trace_log:
         message = entry.get("message", {})
@@ -110,15 +124,31 @@ def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str
         request_id = str(message.get("request_id", ""))
         if entry.get("direction") == "to_player" and request_id:
             request_rounds[request_id] = _extract_round_no_from_request_id(request_id) or latest_round_no
-        round_no = (
-            request_rounds.get(request_id)
-            or _extract_round_no_from_request_id(request_id)
-            or latest_round_no
-        )
+        round_no = request_rounds.get(request_id) or _extract_round_no_from_request_id(request_id) or latest_round_no
         actor = str(entry.get("player_id", "SYS"))
         direction = "REQ" if entry.get("direction") == "to_player" else "RES"
-        details = _render_message_details(message, card_catalog)
-        rendered.append(render_event_log(round_no, actor, direction, details))
+
+        if (
+            direction == "REQ"
+            and message.get("type") == "state_update"
+            and isinstance(payload, dict)
+            and payload.get("viewer_player_id") == actor
+        ):
+            event_log_count = payload.get("event_log_count")
+            if isinstance(event_log_count, int):
+                rendered.extend(
+                    _render_game_events_slice(
+                        safe_game_events,
+                        game_event_cursor,
+                        event_log_count,
+                        card_catalog,
+                    )
+                )
+                game_event_cursor = max(game_event_cursor, event_log_count)
+
+        if show_reqres:
+            details = _render_message_details(message, card_catalog)
+            rendered.append(render_event_log(round_no, actor, direction, details))
 
         if (
             direction == "REQ"
@@ -129,6 +159,8 @@ def _render_trace_log(trace_log: list[dict[str, object]], card_catalog: dict[str
             previous_state = previous_private_states.get(actor)
             rendered.extend(_render_state_diff_events(round_no, actor, previous_state, payload, card_catalog))
             previous_private_states[actor] = payload
+
+    rendered.extend(_render_game_events_slice(safe_game_events, game_event_cursor, len(safe_game_events), card_catalog))
     return _attach_round_event_numbers(rendered)
 
 
@@ -297,14 +329,7 @@ def _render_life_diff(
         current_life = current_player.get("life")
         if isinstance(previous_life, int) and isinstance(current_life, int) and previous_life != current_life:
             delta = current_life - previous_life
-            rendered.append(
-                render_event_log(
-                    round_no,
-                    viewer_id,
-                    "EVT",
-                    f"{player_id}のライフが{current_life}になった ({delta:+d})",
-                )
-            )
+            rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{player_id}のライフが{current_life}になった ({delta:+d})"))
     return rendered
 
 
@@ -357,11 +382,58 @@ def _render_trigger_set_diff(
     if len(current_cards) <= len(previous_cards):
         return []
     rendered: list[str] = []
-    for card_no in current_cards[len(previous_cards) :]:
+    for card_no in current_cards[len(previous_cards):]:
         card_name = _lookup_card_name(card_no, card_catalog)
         if card_name:
             rendered.append(render_event_log(round_no, viewer_id, "EVT", f"{viewer_id}がトリガーゾーンに{card_name}をセット"))
     return rendered
+
+
+def _render_game_events_slice(
+    game_events: list[dict[str, Any]],
+    start_index: int,
+    end_index: int,
+    card_catalog: dict[str, Any],
+) -> list[str]:
+    rendered: list[str] = []
+    for event in game_events[start_index:end_index]:
+        detail = _render_game_event_detail(event, card_catalog)
+        if not detail:
+            continue
+        round_no = int(event.get("round_no", 0) or 0)
+        actor = str(event.get("player_id") or "SYS")
+        rendered.append(render_event_log(round_no, actor, "EVT", detail))
+    return rendered
+
+
+def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any]) -> str | None:
+    event_type = str(event.get("type", ""))
+    player_id = str(event.get("player_id") or "SYS")
+    target_player_id = event.get("target_player_id")
+    amount = event.get("amount")
+    source_card_no = event.get("source_card_no")
+    source_card_name = _lookup_card_name(source_card_no, card_catalog)
+
+    if event_type == "turn_start_draw" and isinstance(amount, int):
+        return f"{player_id}がターン開始時に{amount}枚ドロー"
+    if event_type == "turn_start_cp_set" and isinstance(amount, int):
+        return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
+    if event_type == "turn_end":
+        return f"{player_id}のターン終了"
+    if event_type == "cards_drawn" and isinstance(amount, int):
+        if source_card_name:
+            return f"{source_card_name}の効果で{player_id}が{amount}枚ドロー"
+        return f"{player_id}が{amount}枚ドロー"
+    if event_type == "cp_changed" and isinstance(amount, int):
+        if source_card_name:
+            return f"{source_card_name}の効果で{player_id}のCPが{amount:+d}"
+        return f"{player_id}のCPが{amount:+d}"
+    if event_type == "life_changed" and isinstance(amount, int):
+        subject = str(target_player_id) if isinstance(target_player_id, str) else player_id
+        if source_card_name:
+            return f"{source_card_name}の効果で{subject}のライフが{amount:+d}"
+        return f"{subject}のライフが{amount:+d}"
+    return None
 
 
 def _lookup_card_name(card_no: object, card_catalog: dict[str, Any]) -> str | None:
