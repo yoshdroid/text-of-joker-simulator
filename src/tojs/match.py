@@ -7,20 +7,17 @@ from typing import Any
 from .engine import BootstrapContext, validate_submitted_deck
 from .game import (
     apply_reactive_intercept_action,
-    apply_intercept_action,
     MatchState,
     apply_action,
     build_reactive_intercept_choice_payload,
     apply_mulligan,
     build_block_choice_payload,
-    build_intercept_choice_payload,
     build_state_update_payload,
     create_match_state,
     declare_attack_action,
     get_unit_bp,
     list_available_actions,
     list_available_block_actions,
-    list_available_intercept_actions,
     resolve_declared_attack_action,
     start_turn,
 )
@@ -148,9 +145,7 @@ def play_single_action_cycle(
     if action_response.payload.get("kind") == "attack":
         defender_id = "P2" if actor_id == "P1" else "P1"
         defender = players[defender_id]
-        pre_action_units = _snapshot_battlefield_units(state)
         declare_attack_action(state, actor_id, action_response.payload, rng, choice_resolver)
-        _request_reactive_intercepts(state, players, actor_id, "unit_attacked", trace_log)
         if state.winner is not None:
             _broadcast_state_update(state, players, trace_log, request_prefix="final-state")
             return state
@@ -166,27 +161,9 @@ def play_single_action_cycle(
         ):
             block_payload = choice_resolver(defender_id, block_choice_payload)
 
-        if block_payload.get("kind") == "block":
-            attacker = state.players[actor_id].battlefield[action_response.payload["attacker_index"]]
-            blocker = state.players[defender_id].battlefield[block_payload["blocker_index"]]
-            _request_battle_intercepts(
-                state,
-                players,
-                actor_id,
-                defender_id,
-                attacker,
-                blocker,
-                trace_log,
-            )
-
         resolve_declared_attack_action(state, actor_id, action_response.payload, block_payload, rng, choice_resolver)
-        _request_destroyed_unit_intercepts(state, players, pre_action_units, trace_log)
     else:
-        pre_action_units = _snapshot_battlefield_units(state)
         apply_action(state, actor_id, action_response.payload, rng, choice_resolver)
-        if action_response.payload.get("kind") in {"drive", "overdrive"}:
-            _request_reactive_intercepts(state, players, actor_id, "unit_entered", trace_log)
-        _request_destroyed_unit_intercepts(state, players, pre_action_units, trace_log)
     if state.winner is not None:
         _broadcast_state_update(state, players, trace_log, request_prefix="final-state")
     return state
@@ -276,60 +253,6 @@ def _broadcast_state_update(
             ),
             trace_log,
         )
-
-
-def _request_battle_intercepts(
-    state: MatchState,
-    players: dict[str, PlayerProcess],
-    attacker_id: str,
-    defender_id: str,
-    attacker: Any,
-    blocker: Any,
-    trace_log: TraceLog | None,
-) -> None:
-    choice_resolver = _build_choice_resolver(players, state, trace_log)
-    battle_order = [
-        (attacker_id, True),
-        (defender_id, False),
-    ]
-    pass_count = 0
-    request_serial = 0
-    order_index = 0
-    while pass_count < 2:
-        player_id, own_unit_is_attacker = battle_order[order_index % 2]
-        own_unit = attacker if own_unit_is_attacker else blocker
-        enemy_unit = blocker if own_unit_is_attacker else attacker
-        choice_payload = build_intercept_choice_payload(
-            state,
-            player_id,
-            own_unit,
-            enemy_unit,
-            own_unit_is_attacker,
-        )
-        available_actions = choice_payload["available_choices"]
-        if not any(action.get("kind") == "use_intercept" for action in available_actions):
-            if not choice_payload.get("unavailable_choices"):
-                pass_count += 1
-                order_index += 1
-                continue
-        request_serial += 1
-        choice_payload["request_serial"] = request_serial
-        chosen_action = choice_resolver(player_id, choice_payload)
-        apply_intercept_action(
-            state,
-            player_id,
-            chosen_action,
-            own_unit,
-            enemy_unit,
-            own_unit_is_attacker,
-        )
-        if chosen_action.get("kind") == "use_intercept":
-            pass_count = 0
-        else:
-            pass_count += 1
-        order_index += 1
-
-
 def _request_reactive_intercepts(
     state: MatchState,
     players: dict[str, PlayerProcess],

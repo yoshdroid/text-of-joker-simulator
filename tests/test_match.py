@@ -301,6 +301,45 @@ class MatchRunnerTest(unittest.TestCase):
         self.assertEqual(state.players["P2"].battlefield[1].current_damage, 1000)
         self.assertEqual(state.players["P2"].battlefield[0].current_damage, 0)
 
+    # 反応型インターセプトは priority window から choice_request が送られ、登場時に解決されることを確認する。
+    def test_reactive_intercept_on_unit_entered_is_requested_from_priority_window(self) -> None:
+        card_catalog = {card.card_no: card for card in self.context.cardpool}
+        state = create_match_state(
+            self.context.regulation,
+            card_catalog,
+            ["1-0-001"] * 40,
+            ["1-0-069"] * 40,
+            random.Random(7),
+        )
+        state.round_no = 2
+        state.turn_player_id = "P1"
+        state.turn_serial = 2
+        state.players["P1"].hand = ["1-0-001"]
+        state.players["P1"].current_cp = 1
+        state.players["P2"].trigger_zone = ["1-0-069"]
+
+        first_player = FakePlayerProcess(
+            {
+                "request_action": [{"kind": "drive", "hand_index": 0, "card_no": "1-0-001", "card_level": 1, "cost": 1, "trigger_reducer_index": None}],
+            }
+        )
+        second_player = FakePlayerProcess(
+            {
+                "choice_request": [{"kind": "use_intercept", "trigger_index": 0, "card_no": "1-0-069", "target_index": 0}],
+            }
+        )
+
+        play_single_action_cycle(state, first_player, second_player, seed=7)
+
+        intercept_requests = [
+            message
+            for message in second_player.received_messages
+            if message.type == "choice_request" and message.payload.get("choice_kind") == "intercept"
+        ]
+        self.assertEqual(len(intercept_requests), 1)
+        self.assertEqual(state.players["P1"].battlefield[0].level, 3)
+        self.assertEqual(state.players["P2"].trigger_zone, [])
+
     # ブロック成立後は戦闘前に intercept 用の choice_request が送られ、効果が戦闘結果に反映されることを確認する
     def test_battle_intercept_is_requested_before_combat_damage(self) -> None:
         card_catalog = {card.card_no: card for card in self.context.cardpool}

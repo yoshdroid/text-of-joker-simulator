@@ -588,6 +588,33 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].trigger_zone, [])
         self.assertEqual(state.players["P1"].discard_pile[0], "1-0-062")
 
+    # 相手ユニットの登場では、自分の「あなたのユニットがフィールドに出たとき」trigger は発動しないことを確認する。
+    def test_trigger_zone_field_enter_ability_does_not_fire_for_opponent_unit(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.players["P1"].hand = ["1-0-001"]
+        state.players["P1"].current_cp = 1
+        state.players["P2"].trigger_zone = ["1-0-062", "1-0-061"]
+        state.players["P2"].draw_pile = ["1-0-003", "1-0-074"] + state.players["P2"].draw_pile
+
+        action = {
+            "kind": "drive",
+            "hand_index": 0,
+            "card_no": "1-0-001",
+            "card_level": 1,
+            "cost": 1,
+            "trigger_reducer_index": None,
+        }
+        apply_action(state, "P1", action, random.Random(7))
+
+        self.assertEqual(state.players["P2"].trigger_zone, ["1-0-062", "1-0-061"])
+        trigger_draw_events = [
+            event
+            for event in state.event_log
+            if event["type"] == "cards_drawn" and event["source_card_no"] in {"1-0-061", "1-0-062"}
+        ]
+        self.assertEqual(trigger_draw_events, [])
+
     # 対象選択を伴う登場能力では choice_resolver に渡した対象が選ばれることを確認する
     def test_enter_ability_uses_selected_target(self) -> None:
         state = self.create_state()
@@ -667,6 +694,23 @@ class GameStateTest(unittest.TestCase):
         apply_action(state, "P1", {"kind": "end_turn"}, random.Random(7))
         self.assertEqual(state.players["P1"].battlefield[0].temporary_bp_modifier, 0)
 
+    # 相手側のアタック時能力は、自分のユニットが攻撃した時には発動しないことを確認する。
+    def test_attack_trigger_does_not_fire_for_opponent_attacker(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-002", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-002", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        apply_attack_action(state, "P1", {"kind": "attack", "attacker_index": 0, "target": "player"}, rng=random.Random(7))
+
+        self.assertEqual(state.players["P1"].battlefield[0].temporary_bp_modifier, 2000)
+        self.assertEqual(state.players["P2"].battlefield[0].temporary_bp_modifier, 0)
+
     # 手札選択を伴うアタック時能力では choice_resolver が選んだ手札が捨札になることを確認する
     def test_attack_ability_uses_selected_hand_card(self) -> None:
         state = self.create_state()
@@ -721,6 +765,51 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(len(state.players["P1"].battlefield), 1)
         self.assertEqual(len(state.players["P2"].battlefield), 0)
+
+    # ブロック時能力はブロックした側のユニットだけが発動し、攻撃側の同能力ユニットは発動しないことを確認する。
+    def test_block_trigger_does_not_fire_for_attacker_side_unit(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-045"] = CardDefinition(
+            card_no="1-0-045",
+            category="unit",
+            rarity="R",
+            color="green",
+            name="Leafia",
+            cp=3,
+            bp_by_level=(6, 7, 8),
+            abilities=(AbilityDefinition(name="ブロッカー", text=""),),
+            race="test",
+        )
+        state.card_catalog["1-0-300"] = CardDefinition(
+            card_no="1-0-300",
+            category="unit",
+            rarity="C",
+            color="red",
+            name="Six Power Attacker",
+            cp=1,
+            bp_by_level=(6, 6, 6),
+            abilities=(),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-045", unit_id=1, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="1-0-300", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-045", unit_id=3, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 1, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+        )
+
+        self.assertEqual(state.players["P1"].battlefield[0].temporary_bp_modifier, 0)
 
     # 戦闘で与えるダメージは基本BPではなく、戦闘開始時点の現BPを参照することを確認する。
     def test_combat_damage_uses_current_bp_after_precombat_damage(self) -> None:
@@ -1753,6 +1842,46 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].current_cp, 2)
         self.assertIn("1-0-002", state.players["P1"].hand)
 
+    # ユニット登場時はターンプレイヤーのユニット効果が先に解決され、その後トリガー効果が解決されることを確認する。
+    def test_unit_enter_priority_resolves_grind_beetle_before_trigger(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-043"] = CardDefinition(
+            card_no="1-0-043",
+            category="unit",
+            rarity="R",
+            color="green",
+            name="Grind Beetle",
+            cp=3,
+            bp_by_level=(5, 6, 7),
+            abilities=(
+                AbilityDefinition(name="チャージ", text=""),
+                AbilityDefinition(name="連撃・グラインドドロー", text=""),
+            ),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.used_card_nos_this_turn = []
+        state.players["P1"].current_cp = 3
+        state.players["P1"].hand = ["1-0-043"]
+        state.players["P1"].trigger_zone = ["1-0-061"]
+        state.players["P1"].draw_pile = ["1-0-074", "1-0-074", "1-0-002"] + state.players["P1"].draw_pile
+
+        action = next(action for action in list_available_actions(state, "P1") if action["kind"] == "drive")
+        apply_action(state, "P1", action, random.Random(7))
+
+        cp_index = next(
+            index
+            for index, event in enumerate(state.event_log)
+            if event["type"] == "cp_changed" and event["source_card_no"] == "1-0-043" and event["amount"] == 2
+        )
+        trigger_index = next(
+            index
+            for index, event in enumerate(state.event_log)
+            if event["type"] == "cards_drawn" and event["source_card_no"] == "1-0-061"
+        )
+        self.assertLess(cp_index, trigger_index)
+
     # ブロッカーを持つユニットはブロック時にBP+2000され、相討ちを耐えることを確認する。
     def test_blocker_bonus_applies_before_combat_damage(self) -> None:
         state = self.create_state()
@@ -1837,6 +1966,61 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(len(state.players["P2"].hand), 1)
         self.assertIn("1-0-061", state.players["P1"].hand)
+
+    # 相打ちで双方の破壊時効果が同時に誘発した場合、ターンプレイヤー側の破壊時効果から先に解決されることを確認する。
+    def test_simultaneous_destroyed_effects_resolve_turn_player_first(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-027"] = CardDefinition(
+            card_no="1-0-027",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Lost Unit",
+            cp=1,
+            bp_by_level=(1, 1, 1),
+            abilities=(AbilityDefinition(name="ロスト", text=""),),
+            race="test",
+        )
+        state.card_catalog["1-0-029"] = CardDefinition(
+            card_no="1-0-029",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Intercept Draw Unit",
+            cp=1,
+            bp_by_level=(1, 1, 1),
+            abilities=(AbilityDefinition(name="インターセプトドロー", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-027", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-029", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].hand = ["2-0-001"]
+        state.players["P2"].draw_pile = ["1-0-061", "2-0-002", "2-0-003"]
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+        )
+
+        relevant_events = [
+            (event["type"], event.get("source_card_no"), event.get("player_id"))
+            for event in state.event_log
+            if event["type"] in {"unit_destroyed", "cards_drawn"}
+        ]
+        p1_destroy_index = relevant_events.index(("unit_destroyed", "1-0-027", "P1"))
+        p2_destroy_index = relevant_events.index(("unit_destroyed", "1-0-029", "P2"))
+        p2_draw_index = relevant_events.index(("cards_drawn", "1-0-029", "P2"))
+        self.assertLess(p1_destroy_index, p2_destroy_index)
+        self.assertLess(p2_destroy_index, p2_draw_index)
 
     # 絶妙な挑発は相手ユニットのレベルを3にするが、OCによる回復は発生しないことを確認する。
     def test_reactive_intercept_on_unit_entered_can_set_enemy_level_to_three(self) -> None:

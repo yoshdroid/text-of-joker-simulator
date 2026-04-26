@@ -1027,10 +1027,15 @@ def resolve_declared_attack_action(
             state,
             [
                 AbilityEvent(
-                    type="unit_blocked",
-                    player_id=defender_id,
-                    source_unit_id=blocker.unit_id,
-                    target_player_id=player_id,
+                    type="battle_started",
+                    player_id=player_id,
+                    source_unit_id=attacker.unit_id,
+                    target_player_id=defender_id,
+                    metadata={
+                        "blocker_player_id": defender_id,
+                        "blocker_unit_id": blocker.unit_id,
+                        "blocker_card_no": blocker.card_no,
+                    },
                 )
             ],
             rng,
@@ -1101,10 +1106,10 @@ def resolve_declared_attack_action(
             emitted_events.extend(_clock_up_unit(state, player_id, attacker))
         elif blocker_survives and not attacker_survives:
             emitted_events.extend(_clock_up_unit(state, defender_id, blocker))
-        if emitted_events:
-            resolve_ability_events(state, emitted_events, rng, choice_resolver)
         _destroy_broken_units(state, player_id, rng, choice_resolver)
         _destroy_broken_units(state, defender_id, rng, choice_resolver)
+        if emitted_events:
+            resolve_ability_events(state, emitted_events, rng, choice_resolver)
         _update_winner_by_life(state)
         return
 
@@ -1196,6 +1201,53 @@ def apply_intercept_action(
     _record_card_use(state, card_no)
 
 
+def resolve_battle_intercepts(
+    state: MatchState,
+    attacker_id: PlayerId,
+    defender_id: PlayerId,
+    attacker: UnitState,
+    blocker: UnitState,
+    choice_resolver: ChoiceResolver | None,
+) -> None:
+    battle_order = [
+        (attacker_id, True),
+        (defender_id, False),
+    ]
+    pass_count = 0
+    order_index = 0
+    while pass_count < 2 and state.winner is None:
+        player_id, own_unit_is_attacker = battle_order[order_index % 2]
+        own_unit = attacker if own_unit_is_attacker else blocker
+        enemy_unit = blocker if own_unit_is_attacker else attacker
+        choice_payload = build_intercept_choice_payload(
+            state,
+            player_id,
+            own_unit,
+            enemy_unit,
+            own_unit_is_attacker,
+        )
+        available_actions = choice_payload["available_choices"]
+        if not any(action.get("kind") == "use_intercept" for action in available_actions):
+            if not choice_payload.get("unavailable_choices"):
+                pass_count += 1
+                order_index += 1
+                continue
+        chosen_action = _request_choice(player_id, choice_payload, choice_resolver)
+        apply_intercept_action(
+            state,
+            player_id,
+            chosen_action,
+            own_unit,
+            enemy_unit,
+            own_unit_is_attacker,
+        )
+        if chosen_action.get("kind") == "use_intercept":
+            pass_count = 0
+        else:
+            pass_count += 1
+        order_index += 1
+
+
 def get_drive_cost(state: MatchState, player_id: PlayerId, card_no: str) -> tuple[int, int | None]:
     player = state.players[player_id]
     card = state.card_catalog[card_no]
@@ -1233,7 +1285,13 @@ def resolve_ability_events(
         for triggered_ability in triggered:
             emitted = resolve_triggered_ability(state, event, triggered_ability, rng, choice_resolver)
             next_events.extend(emitted)
-        pending_events = next_events + pending_events
+        if _supports_priority_reactive_intercepts(event):
+            _resolve_priority_reactive_intercepts(state, event, rng, choice_resolver)
+        if _supports_priority_battle_intercepts(event):
+            _resolve_priority_battle_intercepts(state, event, choice_resolver)
+        deferred_events = [next_event for next_event in next_events if next_event.type == "unit_overclocked"]
+        immediate_events = [next_event for next_event in next_events if next_event.type != "unit_overclocked"]
+        pending_events = immediate_events + pending_events + deferred_events
 
 
 def _resolve_system_event(state: MatchState, event: AbilityEvent, rng: random.Random) -> list[AbilityEvent]:
@@ -1307,10 +1365,33 @@ def _record_ability_event(state: MatchState, event: AbilityEvent) -> None:
     state.next_event_no += 1
 
 
-def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
-    triggered: list[dict[str, Any]] = []
-    owner = state.players[event.player_id]
+def _ability_owner_id(event: AbilityEvent, triggered_ability: dict[str, Any]) -> PlayerId:
+    return triggered_ability.get("owner_id", event.player_id)
 
+
+def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    if event.type == "unit_destroyed" and event.source_card_no is not None:
+        return _collect_destroyed_triggered_abilities(state, event)
+    if event.type in {
+        "unit_entered",
+        "unit_attacked",
+        "battle_started",
+        "player_attack_success",
+        "turn_started",
+        "turn_end",
+        "turn_start_draw",
+        "turn_start_cp_set",
+        "cards_drawn",
+        "cp_changed",
+        "life_changed",
+    }:
+        return _collect_priority_triggered_abilities(state, event)
+    return _collect_source_only_triggered_abilities(state, event)
+
+
+def _collect_source_only_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    owner = state.players[event.player_id]
+    triggered: list[dict[str, Any]] = []
     for unit in owner.battlefield:
         if unit.unit_id == 0:
             unit.unit_id = _allocate_unit_id(state)
@@ -1326,46 +1407,169 @@ def collect_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[
                 source_unit_id=unit.unit_id,
             )
         )
+    return triggered
 
-    if event.type == "unit_entered":
-        for index, card_no in enumerate(owner.trigger_zone):
-            triggered.extend(
-                _build_triggered_abilities_for_card(
-                    state,
-                    card_no,
-                    event.type,
-                    event.player_id,
-                    "trigger_zone",
-                    source_index=index,
-                )
-            )
 
-    if event.type in {"turn_started", "turn_end", "turn_start_draw", "turn_start_cp_set", "cards_drawn", "cp_changed", "life_changed"}:
-        for unit in owner.battlefield:
-            if unit.unit_id == 0:
-                unit.unit_id = _allocate_unit_id(state)
-            triggered.extend(
-                _build_triggered_abilities_for_card(
-                    state,
-                    unit.card_no,
-                    event.type,
-                    event.player_id,
-                    "battlefield",
-                    source_unit_id=unit.unit_id,
-                )
-            )
-    if event.type == "unit_destroyed" and event.source_card_no is not None:
+def _collect_destroyed_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    return _build_triggered_abilities_for_card(
+        state,
+        event.source_card_no,
+        event.type,
+        event.player_id,
+        "graveyard",
+        source_unit_id=event.source_unit_id,
+    )
+
+
+def _collect_priority_triggered_abilities(state: MatchState, event: AbilityEvent) -> list[dict[str, Any]]:
+    turn_player_id = state.turn_player_id
+    non_turn_player_id = get_opponent_id(turn_player_id)
+    turn_unit = _collect_priority_unit_abilities_for_side(state, event, turn_player_id)
+    non_turn_unit = _collect_priority_unit_abilities_for_side(state, event, non_turn_player_id)
+    turn_trigger = _collect_priority_trigger_abilities_for_side(state, event, turn_player_id)
+    non_turn_trigger = _collect_priority_trigger_abilities_for_side(state, event, non_turn_player_id)
+    triggered: list[dict[str, Any]] = []
+    triggered.extend(_interleave_priority_bands(turn_unit, non_turn_unit))
+    triggered.extend(_interleave_priority_bands(turn_trigger, non_turn_trigger))
+    return triggered
+
+
+def _collect_priority_unit_abilities_for_side(
+    state: MatchState,
+    event: AbilityEvent,
+    player_id: PlayerId,
+) -> list[dict[str, Any]]:
+    if event.type in {"unit_entered", "unit_attacked", "player_attack_success"} and player_id != event.player_id:
+        return []
+    player = state.players[player_id]
+    source_first_unit_id: int | None = None
+    if event.type == "unit_entered" and player_id == event.player_id:
+        source_first_unit_id = event.source_unit_id
+    elif event.type == "unit_attacked" and player_id == state.turn_player_id:
+        source_first_unit_id = event.source_unit_id
+    elif event.type == "battle_started":
+        if player_id == state.turn_player_id:
+            source_first_unit_id = event.source_unit_id
+        else:
+            metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            blocker_unit_id = metadata.get("blocker_unit_id")
+            if isinstance(blocker_unit_id, int):
+                source_first_unit_id = blocker_unit_id
+
+    prioritized_units: list[UnitState] = []
+    remaining_units: list[UnitState] = []
+    for unit in player.battlefield:
+        if unit.unit_id == 0:
+            unit.unit_id = _allocate_unit_id(state)
+        if source_first_unit_id is not None and unit.unit_id == source_first_unit_id:
+            prioritized_units.append(unit)
+        else:
+            remaining_units.append(unit)
+
+    triggered: list[dict[str, Any]] = []
+    for unit in prioritized_units + remaining_units:
         triggered.extend(
             _build_triggered_abilities_for_card(
                 state,
-                event.source_card_no,
+                unit.card_no,
                 event.type,
-                event.player_id,
-                "graveyard",
-                source_unit_id=event.source_unit_id,
+                player_id,
+                "battlefield",
+                source_unit_id=unit.unit_id,
             )
         )
     return triggered
+
+
+def _collect_priority_trigger_abilities_for_side(
+    state: MatchState,
+    event: AbilityEvent,
+    player_id: PlayerId,
+) -> list[dict[str, Any]]:
+    if event.type in {"unit_entered", "unit_attacked", "player_attack_success"} and player_id != event.player_id:
+        return []
+    player = state.players[player_id]
+    triggered: list[dict[str, Any]] = []
+    for index, card_no in enumerate(player.trigger_zone):
+        triggered.extend(
+            _build_triggered_abilities_for_card(
+                state,
+                card_no,
+                event.type,
+                player_id,
+                "trigger_zone",
+                source_index=index,
+            )
+        )
+    return triggered
+
+
+def _interleave_priority_bands(
+    first_side: list[dict[str, Any]],
+    second_side: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ordered: list[dict[str, Any]] = []
+    first_index = 0
+    second_index = 0
+    while first_index < len(first_side) or second_index < len(second_side):
+        if first_index < len(first_side):
+            ordered.append(first_side[first_index])
+            first_index += 1
+        if second_index < len(second_side):
+            ordered.append(second_side[second_index])
+            second_index += 1
+    return ordered
+
+
+def _supports_priority_reactive_intercepts(event: AbilityEvent) -> bool:
+    return event.type in {"unit_entered", "unit_attacked", "unit_destroyed"}
+
+
+def _supports_priority_battle_intercepts(event: AbilityEvent) -> bool:
+    return event.type == "battle_started"
+
+
+def _resolve_priority_reactive_intercepts(
+    state: MatchState,
+    event: AbilityEvent,
+    rng: random.Random,
+    choice_resolver: ChoiceResolver | None,
+) -> None:
+    player_order = [state.turn_player_id, get_opponent_id(state.turn_player_id)]
+    pass_count = 0
+    order_index = 0
+    while pass_count < 2 and state.winner is None:
+        player_id = player_order[order_index % 2]
+        payload = build_reactive_intercept_choice_payload(state, player_id, event.type)
+        available_choices = payload.get("available_choices", [])
+        if not any(choice.get("kind") == "use_intercept" for choice in available_choices):
+            pass_count += 1
+            order_index += 1
+            continue
+        chosen_action = _request_choice(player_id, payload, choice_resolver)
+        apply_reactive_intercept_action(state, player_id, chosen_action, event.type, rng, choice_resolver)
+        if chosen_action.get("kind") == "use_intercept":
+            pass_count = 0
+        else:
+            pass_count += 1
+        order_index += 1
+
+
+def _resolve_priority_battle_intercepts(
+    state: MatchState,
+    event: AbilityEvent,
+    choice_resolver: ChoiceResolver | None,
+) -> None:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    blocker_player_id = metadata.get("blocker_player_id")
+    blocker_unit_id = metadata.get("blocker_unit_id")
+    if not isinstance(blocker_player_id, str) or not isinstance(blocker_unit_id, int):
+        return
+    attacker = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    blocker = _find_unit_by_id(state, blocker_player_id, blocker_unit_id)
+    if attacker is None or blocker is None:
+        return
+    resolve_battle_intercepts(state, event.player_id, blocker_player_id, attacker, blocker, choice_resolver)
 
 
 def supports_ability_event(card_no: str, event_type: str) -> bool:
@@ -2160,14 +2364,15 @@ def _resolve_happaloid_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    drawn_cards = _draw_card_nos(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    drawn_cards = _draw_card_nos(state.players[owner_id], 1, rng, state.regulation.hand_size_limit)
     if not drawn_cards:
         return []
     return [
         AbilityEvent(
             type="cards_drawn",
-            player_id=event.player_id,
-            target_player_id=event.player_id,
+            player_id=owner_id,
+            target_player_id=owner_id,
             source_card_no=triggered_ability["card_no"],
             amount=len(drawn_cards),
             metadata={"drawn_card_nos": list(drawn_cards)},
@@ -2182,10 +2387,11 @@ def _resolve_ririmu_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    enemy_id = get_opponent_id(event.player_id)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    enemy_id = get_opponent_id(owner_id)
     target = _choose_enemy_unit(
         state,
-        event.player_id,
+        owner_id,
         triggered_ability["card_no"],
         "Choose an enemy unit to deal 4000 damage.",
         choice_resolver,
@@ -2201,16 +2407,17 @@ def _resolve_barbatos_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
+    owner_id = _ability_owner_id(event, triggered_ability)
     enemy_unit = _choose_enemy_unit(
         state,
-        event.player_id,
+        owner_id,
         triggered_ability["card_no"],
         "Choose an enemy unit to reduce base BP by 4000.",
         choice_resolver,
     )
     if enemy_unit is not None:
         enemy_unit.permanent_bp_modifier -= 4000
-        _destroy_broken_units(state, get_opponent_id(event.player_id))
+        _destroy_broken_units(state, get_opponent_id(owner_id))
     return []
 
 
@@ -2234,10 +2441,11 @@ def _resolve_lancer_attack(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    enemy_id = get_opponent_id(event.player_id)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    enemy_id = get_opponent_id(owner_id)
     target = _choose_enemy_unit(
         state,
-        event.player_id,
+        owner_id,
         triggered_ability["card_no"],
         "Choose an enemy unit to deal 1000 damage.",
         choice_resolver,
@@ -2263,15 +2471,16 @@ def _resolve_shiranui_attack(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    source = _find_unit_by_id(state, owner_id, event.source_unit_id)
     discard_index = _choose_hand_card_to_discard(
         state,
-        event.player_id,
+        owner_id,
         triggered_ability["card_no"],
         "Choose a hand card to discard for the attack bonus.",
         choice_resolver,
     )
-    if source is not None and discard_index is not None and _discard_hand_card_by_index(state, event.player_id, discard_index):
+    if source is not None and discard_index is not None and _discard_hand_card_by_index(state, owner_id, discard_index):
         source.temporary_bp_modifier += 4000
     return []
 
@@ -2283,7 +2492,8 @@ def _resolve_shiranui_player_attack_success(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    _destroy_random_trigger_cards(state, event.player_id, 2, rng)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    _destroy_random_trigger_cards(state, owner_id, 2, rng)
     return []
 
 
@@ -2294,7 +2504,8 @@ def _resolve_ririmu_attack_trigger_loss(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    _destroy_random_trigger_cards(state, event.player_id, 1, rng)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    _destroy_random_trigger_cards(state, owner_id, 1, rng)
     return []
 
 
@@ -2305,7 +2516,8 @@ def _resolve_goliath_overclock(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    opponent = state.players[get_opponent_id(event.player_id)]
+    owner_id = _ability_owner_id(event, triggered_ability)
+    opponent = state.players[get_opponent_id(owner_id)]
     opponent.life -= 1
     _update_winner_by_life(state)
     return [
@@ -2326,18 +2538,19 @@ def _resolve_draw_trigger_cards(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    if _count_drawable_cards_by_category(state, event.player_id, "trigger") <= 0:
+    owner_id = _ability_owner_id(event, triggered_ability)
+    if _count_drawable_cards_by_category(state, owner_id, "trigger") <= 0:
         return []
-    if not _consume_trigger_card(state, event.player_id, triggered_ability):
+    if not _consume_trigger_card(state, owner_id, triggered_ability):
         return []
-    drawn_cards = _draw_cards_by_category(state, event.player_id, "trigger", 2)
+    drawn_cards = _draw_cards_by_category(state, owner_id, "trigger", 2)
     if not drawn_cards:
         return []
     return [
         AbilityEvent(
             type="cards_drawn",
-            player_id=event.player_id,
-            target_player_id=event.player_id,
+            player_id=owner_id,
+            target_player_id=owner_id,
             source_card_no=triggered_ability["card_no"],
             amount=len(drawn_cards),
             metadata={"drawn_card_nos": list(drawn_cards)},
@@ -2352,18 +2565,19 @@ def _resolve_draw_intercept_card(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    if _count_drawable_cards_by_category(state, event.player_id, "intercept") <= 0:
+    owner_id = _ability_owner_id(event, triggered_ability)
+    if _count_drawable_cards_by_category(state, owner_id, "intercept") <= 0:
         return []
-    if not _consume_trigger_card(state, event.player_id, triggered_ability):
+    if not _consume_trigger_card(state, owner_id, triggered_ability):
         return []
-    drawn_cards = _draw_cards_by_category(state, event.player_id, "intercept", 1)
+    drawn_cards = _draw_cards_by_category(state, owner_id, "intercept", 1)
     if not drawn_cards:
         return []
     return [
         AbilityEvent(
             type="cards_drawn",
-            player_id=event.player_id,
-            target_player_id=event.player_id,
+            player_id=owner_id,
+            target_player_id=owner_id,
             source_card_no=triggered_ability["card_no"],
             amount=len(drawn_cards),
             metadata={"drawn_card_nos": list(drawn_cards)},
@@ -2378,18 +2592,19 @@ def _resolve_draw_any_card(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    if not _can_draw_any_card(state, event.player_id):
+    owner_id = _ability_owner_id(event, triggered_ability)
+    if not _can_draw_any_card(state, owner_id):
         return []
-    if not _consume_trigger_card(state, event.player_id, triggered_ability):
+    if not _consume_trigger_card(state, owner_id, triggered_ability):
         return []
-    drawn_cards = _draw_card_nos(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    drawn_cards = _draw_card_nos(state.players[owner_id], 1, rng, state.regulation.hand_size_limit)
     if not drawn_cards:
         return []
     return [
         AbilityEvent(
             type="cards_drawn",
-            player_id=event.player_id,
-            target_player_id=event.player_id,
+            player_id=owner_id,
+            target_player_id=owner_id,
             source_card_no=triggered_ability["card_no"],
             amount=len(drawn_cards),
             metadata={"drawn_card_nos": list(drawn_cards)},
@@ -2404,14 +2619,15 @@ def _resolve_untiring(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    source = _find_unit_by_id(state, event.player_id, triggered_ability.get("source_unit_id"))
+    owner_id = _ability_owner_id(event, triggered_ability)
+    source = _find_unit_by_id(state, owner_id, triggered_ability.get("source_unit_id"))
     if source is None or not source.exhausted:
         return []
     source.exhausted = False
     return [
         AbilityEvent(
             type="unit_action_recovered",
-            player_id=event.player_id,
+            player_id=owner_id,
             source_unit_id=source.unit_id,
             source_card_no=source.card_no,
             metadata={"reason": "untiring"},
@@ -2426,16 +2642,17 @@ def _resolve_revive_overclock(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
+    owner_id = _ability_owner_id(event, triggered_ability)
     chosen = _choose_discard_card(
         state,
-        event.player_id,
+        owner_id,
         triggered_ability["card_no"],
         "Choose a discard pile card to return to hand.",
         choice_resolver,
         category=None,
     )
     if chosen is not None:
-        _move_discard_to_hand(state, event.player_id, chosen, reason="revive")
+        _move_discard_to_hand(state, owner_id, chosen, reason="revive")
     return []
 
 
@@ -2446,7 +2663,8 @@ def _resolve_revive_unit_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    player = state.players[event.player_id]
+    owner_id = _ability_owner_id(event, triggered_ability)
+    player = state.players[owner_id]
     unit_indexes = [
         index
         for index, card_no in enumerate(player.discard_pile)
@@ -2455,7 +2673,7 @@ def _resolve_revive_unit_enter(
     if not unit_indexes:
         return []
     chosen_index = rng.choice(unit_indexes)
-    _move_discard_to_hand(state, event.player_id, chosen_index, reason="revive")
+    _move_discard_to_hand(state, owner_id, chosen_index, reason="revive")
     return []
 
 
@@ -2466,7 +2684,8 @@ def _resolve_destroy_high_level_units(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    enemy_id = get_opponent_id(event.player_id)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    enemy_id = get_opponent_id(owner_id)
     enemy = state.players[enemy_id]
     destroy_indexes = [
         index
@@ -2485,7 +2704,8 @@ def _resolve_charge_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    player = state.players[event.player_id]
+    owner_id = _ability_owner_id(event, triggered_ability)
+    player = state.players[owner_id]
     previous_cp = player.current_cp
     player.current_cp = min(player.current_cp + 2, state.regulation.max_cp_per_round)
     gained = player.current_cp - previous_cp
@@ -2494,8 +2714,8 @@ def _resolve_charge_enter(
     return [
         AbilityEvent(
             type="cp_changed",
-            player_id=event.player_id,
-            target_player_id=event.player_id,
+            player_id=owner_id,
+            target_player_id=owner_id,
             source_card_no=triggered_ability["card_no"],
             amount=gained,
             metadata={"before_cp": previous_cp, "after_cp": player.current_cp},
@@ -2510,7 +2730,8 @@ def _resolve_grind_draw_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    source = _find_unit_by_id(state, owner_id, event.source_unit_id)
     if source is None:
         return []
     for used_card_no in state.used_card_nos_this_turn:
@@ -2518,13 +2739,13 @@ def _resolve_grind_draw_enter(
             continue
         used_card = state.card_catalog[used_card_no]
         if _normalize_color(used_card.color) == "green" and (used_card.cp or 0) >= 2:
-            drawn_cards = _draw_card_nos(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+            drawn_cards = _draw_card_nos(state.players[owner_id], 1, rng, state.regulation.hand_size_limit)
             if drawn_cards:
                 return [
                     AbilityEvent(
                         type="cards_drawn",
-                        player_id=event.player_id,
-                        target_player_id=event.player_id,
+                        player_id=owner_id,
+                        target_player_id=owner_id,
                         source_card_no=triggered_ability["card_no"],
                         amount=len(drawn_cards),
                         metadata={"drawn_card_nos": list(drawn_cards)},
@@ -2554,7 +2775,14 @@ def _resolve_blocker_bonus(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    source = _find_unit_by_id(state, event.player_id, event.source_unit_id)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    blocker_player_id = metadata.get("blocker_player_id")
+    blocker_unit_id = metadata.get("blocker_unit_id")
+    source_unit_id = triggered_ability.get("source_unit_id")
+    if owner_id != blocker_player_id or source_unit_id != blocker_unit_id:
+        return []
+    source = _find_unit_by_id(state, owner_id, source_unit_id)
     if source is not None:
         source.temporary_bp_modifier += 2000
     return []
@@ -2567,7 +2795,8 @@ def _resolve_lost_on_destroy(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    opponent = state.players[get_opponent_id(event.player_id)]
+    owner_id = _ability_owner_id(event, triggered_ability)
+    opponent = state.players[get_opponent_id(owner_id)]
     if not opponent.hand:
         return []
     chosen_index = rng.randrange(len(opponent.hand))
@@ -2582,14 +2811,15 @@ def _resolve_intercept_draw_on_destroy(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    drawn_cards = _draw_random_cards_by_category(state, event.player_id, "intercept", 1, rng)
+    owner_id = _ability_owner_id(event, triggered_ability)
+    drawn_cards = _draw_random_cards_by_category(state, owner_id, "intercept", 1, rng)
     if not drawn_cards:
         return []
     return [
         AbilityEvent(
             type="cards_drawn",
-            player_id=event.player_id,
-            target_player_id=event.player_id,
+            player_id=owner_id,
+            target_player_id=owner_id,
             source_card_no=triggered_ability["card_no"],
             amount=len(drawn_cards),
             metadata={"drawn_card_nos": list(drawn_cards)},
@@ -2823,7 +3053,7 @@ ABILITY_REGISTRY: dict[tuple[str, str], Any] = {
     ("1-0-057", "unit_entered"): _resolve_draw_trigger_cards,
     ("1-0-061", "unit_entered"): _resolve_draw_intercept_card,
     ("1-0-062", "unit_entered"): _resolve_draw_any_card,
-    ("1-0-045", "unit_blocked"): _resolve_blocker_bonus,
+    ("1-0-045", "battle_started"): _resolve_blocker_bonus,
     ("1-0-027", "unit_destroyed"): _resolve_lost_on_destroy,
     ("1-0-029", "unit_destroyed"): _resolve_intercept_draw_on_destroy,
     ("1-0-044", "turn_end"): _resolve_untiring,
