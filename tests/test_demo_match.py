@@ -36,6 +36,35 @@ class DemoMatchTest(unittest.TestCase):
         self.assertTrue(any("ユニットドライブ" in line for line in payload["rendered_messages"]))
         self.assertTrue(any("トリガーゾーンに" in line and "セット" in line for line in payload["rendered_messages"]))
 
+    def test_demo_match_command_with_mixed_supported_decks(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tojs.demo_match",
+                "--deck1",
+                "configs/decks/rg_beatdown.json",
+                "--deck2",
+                "configs/decks/gb_controlbeat.json",
+                "--cycles",
+                "12",
+                "--seed",
+                "7",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=".",
+        )
+
+        payload = json.loads(completed.stdout)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertGreaterEqual(len(payload["snapshots"]), 12)
+        self.assertTrue(any("ランサーをユニットドライブ" in line for line in payload["rendered_messages"]))
+        self.assertTrue(any("見習い魔導士リーナをユニットドライブ" in line for line in payload["rendered_messages"]))
+
     def test_render_trace_log_uses_request_round_for_choice_response(self) -> None:
         rendered = _render_trace_log(
             [
