@@ -174,13 +174,13 @@ class DemoMatchTest(unittest.TestCase):
                     "player_id": "P1",
                     "type": "turn_start_cp_set",
                     "amount": 1,
-                    "metadata": {"before_cp": 2, "after_cp": 3},
+                    "metadata": {"before_cp": 2, "after_cp": 3, "set_cp": 3},
                 },
             ],
         )
 
         self.assertIn("ターン開始時に2枚ドロー", rendered[0])
-        self.assertIn("ターン開始時にCPを変動 2 -> 3", rendered[1])
+        self.assertIn("ターン開始 CPセット 3", rendered[1])
         self.assertIn("[REQ] state_update", rendered[2])
         self.assertTrue(rendered[0].startswith("[R02][E001] "))
         self.assertTrue(rendered[1].startswith("[R02][E002] "))

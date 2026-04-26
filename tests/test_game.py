@@ -262,6 +262,7 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.event_log[0]["metadata"]["drawn_card_nos"], [])
         self.assertEqual(state.event_log[1]["type"], "turn_start_cp_set")
         self.assertEqual(state.event_log[1]["amount"], 2)
+        self.assertEqual(state.event_log[1]["metadata"]["set_cp"], 2)
 
     # state_update では自分の手札は見えるが、相手の手札内容は見えないことを確認する。
     def test_build_state_update_payload_hides_opponent_hand(self) -> None:

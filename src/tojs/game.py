@@ -138,7 +138,7 @@ def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> No
                 type="turn_start_cp_set",
                 player_id=player_id,
                 amount=player.current_cp - previous_cp,
-                metadata={"before_cp": previous_cp, "after_cp": player.current_cp},
+                metadata={"before_cp": previous_cp, "after_cp": player.current_cp, "set_cp": player.current_cp},
             ),
         ],
         rng,

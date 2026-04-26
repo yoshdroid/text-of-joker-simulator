@@ -361,11 +361,13 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
     if event_type == "turn_start_draw" and isinstance(amount, int):
         return f"{player_id}がターン開始時に{amount}枚ドロー{drawn_suffix}"
     if event_type == "turn_start_cp_set" and isinstance(amount, int):
-        before_cp = metadata.get("before_cp") if isinstance(metadata, dict) else None
+        set_cp = metadata.get("set_cp") if isinstance(metadata, dict) else None
+        if isinstance(set_cp, int):
+            return f"{player_id}がターン開始 CPセット {set_cp}"
         after_cp = metadata.get("after_cp") if isinstance(metadata, dict) else None
-        if isinstance(before_cp, int) and isinstance(after_cp, int):
-            return f"{player_id}がターン開始時にCPを変動 {before_cp} -> {after_cp}"
-        return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
+        if isinstance(after_cp, int):
+            return f"{player_id}がターン開始 CPセット {after_cp}"
+        return f"{player_id}がターン開始 CPセット"
     if event_type == "turn_end":
         return f"{player_id}のターン終了"
     if event_type == "unit_driven" and source_card_name:
