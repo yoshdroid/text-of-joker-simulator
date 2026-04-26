@@ -2,6 +2,7 @@
 import unittest
 
 from tojs.game import (
+    AbilityEvent,
     UnitState,
     apply_action,
     apply_attack_action,
@@ -15,6 +16,7 @@ from tojs.game import (
     list_available_block_actions,
     list_available_intercept_actions,
     list_available_actions,
+    resolve_ability_events,
     start_turn,
 )
 from tojs.models import AbilityDefinition, CardDefinition, Regulation
@@ -615,6 +617,45 @@ class GameStateTest(unittest.TestCase):
         ]
         self.assertEqual(trigger_draw_events, [])
 
+    # 同じプレイヤーの別ユニットが持つ登場時能力は、そのユニット自身が出た時だけ発動することを確認する。
+    def test_unit_enter_trigger_does_not_fire_for_other_friendly_unit(self) -> None:
+        state = self.create_state()
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-040", unit_id=1, exhausted=False, attack_restricted=True),
+            UnitState(card_no="1-0-001", unit_id=2, exhausted=False, attack_restricted=True),
+        ]
+        before_hand = list(state.players["P1"].hand)
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=2)],
+            random.Random(0),
+        )
+
+        self.assertEqual(state.players["P1"].hand, before_hand)
+
+    # トリガーゾーンのユニットカードは軽減用としてのみ扱われ、ユニット能力は発動しないことを確認する。
+    def test_unit_card_in_trigger_zone_does_not_resolve_unit_abilities(self) -> None:
+        state = self.create_state()
+        state.players["P1"].trigger_zone = ["1-0-012"]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-033", unit_id=3, exhausted=False, attack_restricted=True)
+        ]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=1)],
+            random.Random(0),
+        )
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_attacked", player_id="P1", source_unit_id=1, target_player_id="P2")],
+            random.Random(0),
+        )
+
+        self.assertEqual(state.players["P2"].battlefield[0].current_damage, 0)
+        self.assertEqual(state.players["P2"].trigger_zone, [])
+
     # 対象選択を伴う登場能力では choice_resolver に渡した対象が選ばれることを確認する
     def test_enter_ability_uses_selected_target(self) -> None:
         state = self.create_state()
@@ -710,6 +751,24 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(state.players["P1"].battlefield[0].temporary_bp_modifier, 2000)
         self.assertEqual(state.players["P2"].battlefield[0].temporary_bp_modifier, 0)
+
+    # 同じプレイヤーの別ユニットが持つアタック時能力は、攻撃していない限り発動しないことを確認する。
+    def test_attack_trigger_does_not_fire_for_other_friendly_unit(self) -> None:
+        state = self.create_state()
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-002", unit_id=1, level=1, exhausted=False, attack_restricted=False),
+            UnitState(card_no="1-0-012", unit_id=2, level=1, exhausted=False, attack_restricted=False),
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="1-0-033", unit_id=3, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        apply_attack_action(state, "P1", {"kind": "attack", "attacker_index": 0, "target": "player"}, rng=random.Random(7))
+
+        self.assertEqual(state.players["P2"].battlefield[0].current_damage, 0)
+        self.assertEqual(state.players["P1"].battlefield[0].temporary_bp_modifier, 2000)
 
     # 手札選択を伴うアタック時能力では choice_resolver が選んだ手札が捨札になることを確認する
     def test_attack_ability_uses_selected_hand_card(self) -> None:

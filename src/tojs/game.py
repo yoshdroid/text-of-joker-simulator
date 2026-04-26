@@ -68,6 +68,7 @@ class EventDefinition:
     type: str
     collection_mode: str = "source_only"
     source_side_only: bool = False
+    unit_ability_source_only: bool = False
     source_first_turn_player: bool = False
     source_first_non_turn_metadata_key: str | None = None
     reactive_intercept_window: bool = False
@@ -83,6 +84,7 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
         type="unit_entered",
         collection_mode="priority",
         source_side_only=True,
+        unit_ability_source_only=True,
         source_first_turn_player=True,
         reactive_intercept_window=True,
     ),
@@ -90,12 +92,14 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
         type="unit_attacked",
         collection_mode="priority",
         source_side_only=True,
+        unit_ability_source_only=True,
         source_first_turn_player=True,
         reactive_intercept_window=True,
     ),
     EventDefinition(
         type="battle_started",
         collection_mode="priority",
+        unit_ability_source_only=True,
         source_first_turn_player=True,
         source_first_non_turn_metadata_key="blocker_unit_id",
         battle_intercept_window=True,
@@ -104,6 +108,7 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
         type="player_attack_success",
         collection_mode="priority",
         source_side_only=True,
+        unit_ability_source_only=True,
     ),
     EventDefinition(
         type="unit_destroyed",
@@ -1489,7 +1494,9 @@ def _collect_priority_unit_abilities_for_side(
         return []
     player = state.players[player_id]
     source_first_unit_id: int | None = None
-    if definition.source_first_turn_player and player_id == state.turn_player_id:
+    if player_id == event.player_id and event.source_unit_id is not None:
+        source_first_unit_id = event.source_unit_id
+    elif definition.source_first_turn_player and player_id == state.turn_player_id:
         source_first_unit_id = event.source_unit_id
     elif (
         definition.source_first_non_turn_metadata_key is not None
@@ -1511,7 +1518,13 @@ def _collect_priority_unit_abilities_for_side(
             remaining_units.append(unit)
 
     triggered: list[dict[str, Any]] = []
-    for unit in prioritized_units + remaining_units:
+    if definition.unit_ability_source_only and source_first_unit_id is not None:
+        candidate_units = prioritized_units[:1]
+    elif definition.unit_ability_source_only:
+        candidate_units = []
+    else:
+        candidate_units = prioritized_units + remaining_units
+    for unit in candidate_units:
         triggered.extend(
             _build_triggered_abilities_for_card(
                 state,
@@ -1536,6 +1549,9 @@ def _collect_priority_trigger_abilities_for_side(
     player = state.players[player_id]
     triggered: list[dict[str, Any]] = []
     for index, card_no in enumerate(player.trigger_zone):
+        card = state.card_catalog[card_no]
+        if card.category not in {"trigger", "intercept"}:
+            continue
         triggered.extend(
             _build_triggered_abilities_for_card(
                 state,
