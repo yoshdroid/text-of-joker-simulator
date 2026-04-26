@@ -31,7 +31,7 @@ class DemoMatchTest(unittest.TestCase):
         self.assertEqual(payload["messages"][0]["direction"], "to_player")
         self.assertEqual(payload["messages"][1]["direction"], "from_player")
         self.assertTrue(payload["rendered_messages"][0].startswith("[R"))
-        self.assertIn("[E", payload["rendered_messages"][0])
+        self.assertTrue(any("[E" in line for line in payload["rendered_messages"]))
         self.assertIn("ターン開始時", "\n".join(payload["rendered_messages"]))
         self.assertTrue(any("state_update" in line and "life=" in line for line in payload["rendered_messages"]))
         self.assertTrue(any("ユニットドライブ" in line for line in payload["rendered_messages"]))
@@ -52,7 +52,7 @@ class DemoMatchTest(unittest.TestCase):
 
         self.assertTrue(payload["rendered_messages"])
         self.assertFalse(any("[REQ]" in line or "[RES]" in line for line in payload["rendered_messages"]))
-        self.assertTrue(any("[EVT]" in line for line in payload["rendered_messages"]))
+        self.assertTrue(any("[E" in line for line in payload["rendered_messages"]))
 
     # 混成デッキ同士の対戦でも観戦ログが崩れず生成できることを確認する
     def test_demo_match_command_with_mixed_supported_decks(self) -> None:
@@ -110,8 +110,8 @@ class DemoMatchTest(unittest.TestCase):
             {},
         )
 
-        self.assertTrue(rendered[0].startswith("[R09][E001][P1][REQ]"))
-        self.assertTrue(rendered[1].startswith("[R09][E002][P1][RES]"))
+        self.assertTrue(rendered[0].startswith("[R09][P1][REQ]"))
+        self.assertTrue(rendered[1].startswith("[R09][P1][RES]"))
 
     # request_actionへの応答も対応する要求のROUND番号で描画されることを確認する
     def test_render_trace_log_uses_request_round_for_request_action(self) -> None:
@@ -139,8 +139,8 @@ class DemoMatchTest(unittest.TestCase):
             {},
         )
 
-        self.assertTrue(rendered[0].startswith("[R04][E001][P2][REQ]"))
-        self.assertTrue(rendered[1].startswith("[R04][E002][P2][RES]"))
+        self.assertTrue(rendered[0].startswith("[R04][P2][REQ]"))
+        self.assertTrue(rendered[1].startswith("[R04][P2][RES]"))
 
     # game_eventsはstate_updateのevent_log_countに合わせて時系列に差し込まれることを確認する
     def test_render_trace_log_inserts_game_events_before_state_update(self) -> None:
@@ -176,8 +176,8 @@ class DemoMatchTest(unittest.TestCase):
         self.assertIn("ターン開始時に2枚ドロー", rendered[0])
         self.assertIn("ターン開始時にCPを変動 +1", rendered[1])
         self.assertIn("[REQ] state_update", rendered[2])
-        self.assertIn("[SYS][EVT]", rendered[0])
-        self.assertIn("[SYS][EVT]", rendered[1])
+        self.assertTrue(rendered[0].startswith("[R02][E001] "))
+        self.assertTrue(rendered[1].startswith("[R02][E002] "))
 
     # show_reqres=FalseのときはREQ/RES行が省かれることを確認する
     def test_render_trace_log_can_hide_reqres(self) -> None:
@@ -277,8 +277,7 @@ class DemoMatchTest(unittest.TestCase):
         )
 
         life_lines = [line for line in rendered if "P2のライフが6になった" in line]
-        self.assertEqual(len(life_lines), 1)
-        self.assertIn("[SYS][EVT]", life_lines[0])
+        self.assertEqual(life_lines, [])
 
     # アタック宣言とブロック宣言は選択ユニットのカード名つきで表示されることを確認する
     def test_render_trace_log_renders_attack_and_block_with_card_names(self) -> None:
@@ -476,6 +475,100 @@ class DemoMatchTest(unittest.TestCase):
 
         self.assertTrue(any("P1のトリガー 不可侵防壁 が発動" in line for line in rendered))
         self.assertTrue(any("P2がダーク・アーマーをインターセプト使用" in line for line in rendered))
+
+
+    def test_render_trace_log_renders_drawn_card_names(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-040": type("Card", (), {"name": "ハッパロイド"})(),
+                "1-0-003": type("Card", (), {"name": "Red Unit 3"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "type": "card_moved",
+                    "source_card_no": "1-0-003",
+                    "metadata": {"from_zone": "deck", "to_zone": "hand", "reason": "draw_effect"},
+                },
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "type": "cards_drawn",
+                    "source_card_no": "1-0-040",
+                    "amount": 1,
+                    "metadata": {"drawn_card_nos": ["1-0-003"]},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("ハッパロイドの効果でP1が1枚ドロー" in line for line in rendered))
+        self.assertTrue(any("Red Unit 3" in line for line in rendered))
+        self.assertTrue(any("山札から手札に加える" in line and "Red Unit 3" in line for line in rendered))
+
+    def test_render_trace_log_renders_revive_move(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-003": type("Card", (), {"name": "Red Unit 3"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "type": "card_moved",
+                    "source_card_no": "1-0-003",
+                    "metadata": {"from_zone": "discard", "to_zone": "hand", "reason": "revive"},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertTrue(any("Red Unit 3" in line and "捨札から手札に戻る" in line for line in rendered))
+
+
+    def test_render_trace_log_renders_life_changed_for_player_attack(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {
+                "1-0-004": type("Card", (), {"name": "繝ｩ繝ｳ繧ｵ繝ｼ"})(),
+            },
+            [
+                {
+                    "round_no": 3,
+                    "player_id": "P1",
+                    "target_player_id": "P2",
+                    "type": "life_changed",
+                    "source_card_no": "1-0-004",
+                    "amount": -1,
+                    "metadata": {"reason": "player_attack", "current_life": 6},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R03][E001] 繝ｩ繝ｳ繧ｵ繝ｼのアタックでP2のライフが-1 (現LIFE 6)"])
+
+        self.assertEqual(rendered, ["[R03][E001] 繝ｩ繝ｳ繧ｵ繝ｼのアタックでP2のライフが-1 (現LIFE 6)"])
+
+    def test_render_trace_log_renders_match_ended(self) -> None:
+        rendered = _render_trace_log(
+            [],
+            {},
+            [
+                {
+                    "round_no": 4,
+                    "player_id": "P1",
+                    "type": "match_ended",
+                    "metadata": {"winner": "P1", "reason": "life_zero"},
+                }
+            ],
+            show_reqres=False,
+        )
+
+        self.assertEqual(rendered, ["[R04][E001] P1の勝利"])
 
 
 if __name__ == "__main__":

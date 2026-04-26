@@ -27,8 +27,12 @@ def decode_message(line: str) -> Message:
 
 
 def render_event_log(round_no: int, actor: str, kind: str, details: str, event_no: int | None = None) -> str:
+    if kind in {"REQ", "RES"}:
+        return f"[R{round_no:02d}][{actor}][{kind}] {details}"
     if event_no is None:
         return f"[R{round_no:02d}][{actor}][{kind}] {details}"
+    if kind == "EVT":
+        return f"[R{round_no:02d}][E{event_no:03d}] {details}"
     return f"[R{round_no:02d}][E{event_no:03d}][{actor}][{kind}] {details}"
 
 

@@ -259,6 +259,7 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P1"].current_cp, 2)
         self.assertEqual(state.event_log[0]["type"], "turn_start_draw")
         self.assertEqual(state.event_log[0]["amount"], 0)
+        self.assertEqual(state.event_log[0]["metadata"]["drawn_card_nos"], [])
         self.assertEqual(state.event_log[1]["type"], "turn_start_cp_set")
         self.assertEqual(state.event_log[1]["amount"], 2)
 
@@ -431,6 +432,17 @@ class GameStateTest(unittest.TestCase):
         self.assertIn("card_moved", event_types)
         self.assertIn("card_overridden", event_types)
         self.assertIn("cards_drawn", event_types)
+        draw_event = next(event for event in state.event_log if event["type"] == "cards_drawn")
+        self.assertEqual(draw_event["metadata"]["drawn_card_nos"], ["1-0-003"])
+        moved_event = next(
+            event
+            for event in state.event_log
+            if event["type"] == "card_moved"
+            and event["source_card_no"] == "1-0-003"
+            and event["metadata"]["from_zone"] == "deck"
+        )
+        self.assertEqual(moved_event["metadata"]["to_zone"], "hand")
+        self.assertEqual(moved_event["metadata"]["reason"], "override_draw")
 
     # Lv.2 の同名カード同士を override すると Lv.3 になり、山札不足時は捨札を含む新山札から 1 枚引くことを確認する。
     def test_apply_override_action_reaches_level_three(self) -> None:
@@ -547,7 +559,12 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(state.players["P1"].battlefield[0].card_no, "1-0-040")
         self.assertEqual(state.players["P1"].hand, ["1-0-003"])
-        self.assertTrue(any(event["type"] == "cards_drawn" and event["source_card_no"] == "1-0-040" for event in state.event_log))
+        draw_event = next(
+            event
+            for event in state.event_log
+            if event["type"] == "cards_drawn" and event["source_card_no"] == "1-0-040"
+        )
+        self.assertEqual(draw_event["metadata"]["drawn_card_nos"], ["1-0-003"])
 
     # 何でも屋の陳列台を trigger_zone に置いた時、自分のユニット登場で 1 枚ドローすることを確認する。
     def test_trigger_zone_field_enter_ability_draws_card(self) -> None:
@@ -1138,6 +1155,23 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(state.players["P2"].life, 6)
         self.assertTrue(state.players["P1"].battlefield[0].exhausted)
+        self.assertTrue(
+            any(
+                event["type"] == "life_changed"
+                and event["target_player_id"] == "P2"
+                and event["amount"] == -1
+                for event in state.event_log
+            )
+        )
+        self.assertTrue(
+            any(
+                event["type"] == "life_changed"
+                and event["target_player_id"] == "P2"
+                and event.get("metadata", {}).get("reason") == "player_attack"
+                and event.get("metadata", {}).get("current_life") == 6
+                for event in state.event_log
+            )
+        )
 
     # ライフが 0 以下になった時は、その場で勝敗が確定することを確認する。
     def test_apply_attack_action_ends_match_when_life_reaches_zero(self) -> None:
@@ -1154,6 +1188,14 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P2"].life, 0)
         self.assertEqual(state.winner, "P1")
         self.assertEqual(state.ended_reason, "life_zero")
+        self.assertTrue(
+            any(
+                event["type"] == "match_ended"
+                and event.get("metadata", {}).get("winner") == "P1"
+                and event.get("metadata", {}).get("reason") == "life_zero"
+                for event in state.event_log
+            )
+        )
 
     def test_end_turn_decides_winner_by_life_at_round_limit(self) -> None:
         state = self.create_state()
@@ -1168,6 +1210,14 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.round_no, state.regulation.round_count)
         self.assertEqual(state.winner, "P1")
         self.assertEqual(state.ended_reason, "round_limit")
+        self.assertTrue(
+            any(
+                event["type"] == "match_ended"
+                and event.get("metadata", {}).get("winner") == "P1"
+                and event.get("metadata", {}).get("reason") == "round_limit"
+                for event in state.event_log
+            )
+        )
 
     # 1 体ブロックされたアタックでは両者の BP 比較で破壊判定が行われることを確認する。
     def test_apply_attack_action_with_single_block(self) -> None:
@@ -1504,6 +1554,14 @@ class GameStateTest(unittest.TestCase):
         )
 
         self.assertIn("1-0-003", state.players["P1"].hand)
+        moved_event = next(
+            event
+            for event in state.event_log
+            if event["type"] == "card_moved" and event["source_card_no"] == "1-0-003"
+        )
+        self.assertEqual(moved_event["metadata"]["from_zone"], "discard")
+        self.assertEqual(moved_event["metadata"]["to_zone"], "hand")
+        self.assertEqual(moved_event["metadata"]["reason"], "revive")
 
     # 登場時リバイブは自分の捨札のユニットをランダムで手札へ戻すことを確認する。
     def test_revive_unit_enter_returns_random_unit_from_discard(self) -> None:
@@ -1747,6 +1805,11 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(state.players["P2"].battlefield[0].level, 3)
         self.assertTrue(state.players["P2"].battlefield[0].exhausted)
         self.assertTrue(state.players["P2"].battlefield[0].attack_restricted)
+        level_event = next(event for event in state.event_log if event["type"] == "unit_level_changed")
+        self.assertEqual(level_event["player_id"], "P2")
+        self.assertEqual(level_event["metadata"]["from_level"], 1)
+        self.assertEqual(level_event["metadata"]["to_level"], 3)
+        self.assertEqual(level_event["metadata"]["reason"], "effect")
 
     # ムーンセイヴァーは攻撃時にLv.2以上の相手ユニットを破壊できることを確認する。
     def test_reactive_intercept_on_unit_attacked_can_destroy_level_two_or_higher_unit(self) -> None:
@@ -1834,6 +1897,13 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(own_unit.temporary_bp_modifier, 7000)
         self.assertEqual(state.players["P1"].life, 6)
+        bp_index = next(index for index, event in enumerate(state.event_log) if event["type"] == "unit_bp_modified")
+        life_index = next(
+            index
+            for index, event in enumerate(state.event_log)
+            if event["type"] == "life_changed" and event["source_card_no"] == "1-0-091"
+        )
+        self.assertLess(bp_index, life_index)
 
     # エクトプラズムは自分のユニット破壊時に相手ユニットを破壊できることを確認する。
     def test_reactive_intercept_on_unit_destroyed_can_destroy_enemy_unit(self) -> None:

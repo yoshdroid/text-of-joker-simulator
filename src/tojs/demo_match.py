@@ -283,14 +283,7 @@ def _render_state_diff_events(
     previous_state: dict[str, Any] | None,
     current_state: dict[str, Any],
 ) -> list[str]:
-    if previous_state is None:
-        return []
-
-    current_players = current_state.get("players", {})
-    previous_players = previous_state.get("players", {})
-    if not isinstance(current_players, dict) or not isinstance(previous_players, dict):
-        return []
-    return _render_life_diff(round_no, previous_players, current_players)
+    return []
 
 
 def _render_life_diff(
@@ -362,9 +355,11 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
     metadata = event.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
+    drawn_card_names = _lookup_card_names(metadata.get("drawn_card_nos"), card_catalog)
+    drawn_suffix = f" ({' / '.join(drawn_card_names)})" if drawn_card_names else ""
 
     if event_type == "turn_start_draw" and isinstance(amount, int):
-        return f"{player_id}がターン開始時に{amount}枚ドロー"
+        return f"{player_id}がターン開始時に{amount}枚ドロー{drawn_suffix}"
     if event_type == "turn_start_cp_set" and isinstance(amount, int):
         return f"{player_id}がターン開始時にCPを変動 {amount:+d}"
     if event_type == "turn_end":
@@ -453,10 +448,30 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         from_zone = metadata.get("from_zone")
         to_zone = metadata.get("to_zone")
         reason = metadata.get("reason")
+        if from_zone == "deck" and to_zone == "hand" and reason == "turn_start_draw":
+            return f"{player_id}が{source_card_name}を山札から手札に加える"
+        if from_zone == "deck" and to_zone == "hand" and reason == "override_draw":
+            return f"{player_id}が{source_card_name}をオーバーライドのドローで手札に加える"
+        if from_zone == "deck" and to_zone == "hand" and isinstance(reason, str) and reason.startswith("draw_by_category:"):
+            return f"{player_id}が{source_card_name}を効果で山札から手札に加える"
+        if from_zone == "deck" and to_zone == "hand" and isinstance(reason, str) and reason.startswith("draw_random_by_category:"):
+            return f"{player_id}が{source_card_name}を効果で山札から手札に加える"
+        if from_zone == "deck" and to_zone == "hand":
+            return f"{player_id}が{source_card_name}を山札から手札に加える"
         if from_zone == "trigger_zone" and to_zone == "discard" and reason == "cost_reduction":
             return f"{player_id}の{source_card_name}がコスト軽減で捨札へ移動"
         if from_zone == "hand" and to_zone == "discard" and reason == "override_material":
             return f"{player_id}の{source_card_name}がオーバーライド素材として捨札へ移動"
+        if from_zone == "discard" and to_zone == "hand" and reason == "revive":
+            return f"{player_id}の{source_card_name}が捨札から手札に戻る"
+        if from_zone == "hand" and to_zone == "discard" and reason == "discard_effect":
+            return f"{player_id}の{source_card_name}が手札から捨札へ移動"
+        if from_zone == "trigger_zone" and to_zone == "discard" and reason == "trigger_resolution":
+            return f"{player_id}のトリガー {source_card_name} が解決され捨札へ移動"
+        if from_zone == "trigger_zone" and to_zone == "discard" and reason == "intercept_resolution":
+            return f"{player_id}のインターセプト {source_card_name} が解決され捨札へ移動"
+        if from_zone == "trigger_zone" and to_zone == "discard" and reason == "trigger_destroyed":
+            return f"{player_id}のトリガーゾーンの{source_card_name}が破壊され捨札へ移動"
         return f"{player_id}の{source_card_name}が{from_zone}から{to_zone}へ移動"
     if event_type == "trigger_used" and source_card_name:
         return f"{player_id}のトリガー {source_card_name} が発動"
@@ -464,17 +479,27 @@ def _render_game_event_detail(event: dict[str, Any], card_catalog: dict[str, Any
         return f"{player_id}が{source_card_name}をインターセプト使用"
     if event_type == "cards_drawn" and isinstance(amount, int):
         if source_card_name:
-            return f"{source_card_name}の効果で{player_id}が{amount}枚ドロー"
-        return f"{player_id}が{amount}枚ドロー"
+            return f"{source_card_name}の効果で{player_id}が{amount}枚ドロー{drawn_suffix}"
+        return f"{player_id}が{amount}枚ドロー{drawn_suffix}"
     if event_type == "cp_changed" and isinstance(amount, int):
         if source_card_name:
             return f"{source_card_name}の効果で{player_id}のCPが{amount:+d}"
         return f"{player_id}のCPが{amount:+d}"
     if event_type == "life_changed" and isinstance(amount, int):
         subject = str(target_player_id) if isinstance(target_player_id, str) else player_id
+        current_life = metadata.get("current_life") if isinstance(metadata, dict) else None
+        if source_card_name and isinstance(metadata, dict) and metadata.get("reason") == "player_attack":
+            suffix = f" (現LIFE {current_life})" if isinstance(current_life, int) else ""
+            return f"{source_card_name}のアタックで{subject}のライフが{amount:+d}{suffix}"
         if source_card_name:
             return f"{source_card_name}の効果で{subject}のライフが{amount:+d}"
         return f"{subject}のライフが{amount:+d}"
+    if event_type == "match_ended" and isinstance(metadata, dict):
+        winner = metadata.get("winner")
+        if winner == "draw":
+            return "引き分け"
+        if isinstance(winner, str):
+            return f"{winner}の勝利"
     return None
 
 
@@ -485,6 +510,17 @@ def _lookup_card_name(card_no: object, card_catalog: dict[str, Any]) -> str | No
     return getattr(card, "name", None)
 
 
+def _lookup_card_names(card_nos: object, card_catalog: dict[str, Any]) -> list[str]:
+    if not isinstance(card_nos, list):
+        return []
+    names: list[str] = []
+    for card_no in card_nos:
+        card_name = _lookup_card_name(card_no, card_catalog)
+        if card_name is not None:
+            names.append(card_name)
+    return names
+
+
 def _attach_round_event_numbers(rendered: list[str]) -> list[str]:
     numbered: list[str] = []
     round_event_numbers: dict[int, int] = {}
@@ -493,10 +529,17 @@ def _attach_round_event_numbers(rendered: list[str]) -> list[str]:
         if round_no is None:
             numbered.append(line)
             continue
+        if "[REQ]" in line or "[RES]" in line:
+            numbered.append(line)
+            continue
         event_no = round_event_numbers.get(round_no, 0) + 1
         round_event_numbers[round_no] = event_no
         prefix = f"[R{round_no:02d}]"
-        numbered.append(line.replace(prefix, f"{prefix}[E{event_no:03d}]", 1))
+        updated = line.replace(prefix, f"{prefix}[E{event_no:03d}]", 1)
+        updated = updated.replace("[EVT]", "", 1)
+        updated = updated.replace("[SYS]", "", 1)
+        updated = updated.replace("]  ", "] ", 1)
+        numbered.append(updated)
     return numbered
 
 

@@ -115,11 +115,17 @@ def start_turn(state: MatchState, player_id: PlayerId, rng: random.Random) -> No
     player = state.players[player_id]
     draw_count = get_scheduled_draw_count(state, player)
     cp_value = get_scheduled_cp(state, player)
-    actual_draw = draw_cards(player, draw_count, rng, state.regulation.hand_size_limit)
+    drawn_cards = _draw_card_nos(player, draw_count, rng, state.regulation.hand_size_limit)
+    _record_draw_card_moves(state, player_id, drawn_cards, reason="turn_start_draw")
     resolve_ability_events(
         state,
         [
-            AbilityEvent(type="turn_start_draw", player_id=player_id, amount=actual_draw),
+            AbilityEvent(
+                type="turn_start_draw",
+                player_id=player_id,
+                amount=len(drawn_cards),
+                metadata={"drawn_card_nos": list(drawn_cards)},
+            ),
         ],
         rng,
     )
@@ -158,12 +164,11 @@ def end_turn(state: MatchState, rng: random.Random) -> None:
         first_life = state.players["P1"].life
         second_life = state.players["P2"].life
         if first_life > second_life:
-            state.winner = "P1"
+            _set_match_outcome(state, "P1", "round_limit")
         elif second_life > first_life:
-            state.winner = "P2"
+            _set_match_outcome(state, "P2", "round_limit")
         else:
-            state.winner = "draw"
-        state.ended_reason = "round_limit"
+            _set_match_outcome(state, "draw", "round_limit")
         return
 
     if state.turn_player_id == "P2":
@@ -228,15 +233,32 @@ def build_state_update_payload(state: MatchState, viewer_id: PlayerId) -> dict[s
 
 
 def draw_cards(player: PlayerState, count: int, rng: random.Random, hand_limit: int) -> int:
+    return len(_draw_card_nos(player, count, rng, hand_limit))
+
+
+def _draw_card_nos(player: PlayerState, count: int, rng: random.Random, hand_limit: int) -> list[str]:
     if count <= 0 or len(player.hand) >= hand_limit:
-        return 0
+        return []
     actual_count = min(count, hand_limit - len(player.hand))
     if len(player.draw_pile) < actual_count:
         _rebuild_draw_pile(player, rng)
     drawn = player.draw_pile[:actual_count]
     del player.draw_pile[:actual_count]
     player.hand.extend(drawn)
-    return len(drawn)
+    return drawn
+
+
+def _record_draw_card_moves(state: MatchState, player_id: PlayerId, drawn_cards: list[str], reason: str) -> None:
+    for card_no in drawn_cards:
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="card_moved",
+                player_id=player_id,
+                source_card_no=card_no,
+                metadata={"from_zone": "deck", "to_zone": "hand", "reason": reason},
+            ),
+        )
 
 
 def _rebuild_draw_pile(player: PlayerState, rng: random.Random) -> None:
@@ -880,8 +902,9 @@ def apply_override_action(
             metadata={"from_level": base_level, "to_level": new_level},
         ),
     )
-    drawn = draw_cards(player, 1, rng, state.regulation.hand_size_limit)
-    if drawn > 0:
+    drawn_cards = _draw_card_nos(player, 1, rng, state.regulation.hand_size_limit)
+    if drawn_cards:
+        _record_draw_card_moves(state, player_id, drawn_cards, reason="override_draw")
         _record_ability_event(
             state,
             AbilityEvent(
@@ -889,7 +912,8 @@ def apply_override_action(
                 player_id=player_id,
                 target_player_id=player_id,
                 source_card_no=base_card_no,
-                amount=drawn,
+                amount=len(drawn_cards),
+                metadata={"drawn_card_nos": list(drawn_cards)},
             ),
         )
     _record_card_use(state, base_card_no)
@@ -1087,11 +1111,20 @@ def resolve_declared_attack_action(
         state,
         [
             AbilityEvent(
+                type="life_changed",
+                player_id=player_id,
+                source_unit_id=attacker.unit_id,
+                source_card_no=attacker.card_no,
+                target_player_id=defender_id,
+                amount=-1,
+                metadata={"reason": "player_attack", "current_life": defender.life},
+            ),
+            AbilityEvent(
                 type="player_attack_success",
                 player_id=player_id,
                 source_unit_id=attacker.unit_id,
                 target_player_id=defender_id,
-            )
+            ),
         ],
         rng,
         choice_resolver,
@@ -1122,6 +1155,15 @@ def apply_intercept_action(
     player.current_cp -= card.cp or 0
     used_card_no = player.trigger_zone.pop(trigger_index)
     player.discard_pile.insert(0, used_card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=used_card_no,
+            metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "intercept_resolution"},
+        ),
+    )
     _record_ability_event(
         state,
         AbilityEvent(
@@ -1542,10 +1584,10 @@ def _draw_cards_by_category(
     player_id: PlayerId,
     category: str,
     count: int,
-) -> int:
+) -> list[str]:
     player = state.players[player_id]
     if count <= 0 or len(player.hand) >= state.regulation.hand_size_limit:
-        return 0
+        return []
     matches: list[str] = []
     remaining: list[str] = []
     for card_no in player.draw_pile:
@@ -1556,7 +1598,8 @@ def _draw_cards_by_category(
     player.draw_pile = remaining
     actual_matches = matches[: max(0, state.regulation.hand_size_limit - len(player.hand))]
     player.hand.extend(actual_matches)
-    return len(actual_matches)
+    _record_draw_card_moves(state, player_id, actual_matches, reason=f"draw_by_category:{category}")
+    return actual_matches
 
 
 def _draw_random_cards_by_category(
@@ -1565,17 +1608,17 @@ def _draw_random_cards_by_category(
     category: str,
     count: int,
     rng: random.Random,
-) -> int:
+) -> list[str]:
     player = state.players[player_id]
     if count <= 0 or len(player.hand) >= state.regulation.hand_size_limit:
-        return 0
+        return []
 
     matching_indexes = [
         index for index, card_no in enumerate(player.draw_pile) if state.card_catalog[card_no].category == category
     ]
     actual_count = min(count, len(matching_indexes), state.regulation.hand_size_limit - len(player.hand))
     if actual_count <= 0:
-        return 0
+        return []
 
     selected_indexes = set(rng.sample(matching_indexes, actual_count))
     drawn_cards: list[str] = []
@@ -1587,7 +1630,8 @@ def _draw_random_cards_by_category(
             remaining_cards.append(card_no)
     player.draw_pile = remaining_cards
     player.hand.extend(drawn_cards)
-    return len(drawn_cards)
+    _record_draw_card_moves(state, player_id, drawn_cards, reason=f"draw_random_by_category:{category}")
+    return drawn_cards
 
 
 def _count_drawable_cards_by_category(state: MatchState, player_id: PlayerId, category: str) -> int:
@@ -1617,6 +1661,15 @@ def _consume_trigger_card(
             _record_ability_event(
                 state,
                 AbilityEvent(
+                    type="card_moved",
+                    player_id=player_id,
+                    source_card_no=used_card_no,
+                    metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "trigger_resolution"},
+                ),
+            )
+            _record_ability_event(
+                state,
+                AbilityEvent(
                     type="trigger_used",
                     player_id=player_id,
                     target_player_id=player_id,
@@ -1627,6 +1680,15 @@ def _consume_trigger_card(
     if card_no in player.trigger_zone:
         player.trigger_zone.remove(card_no)
         player.discard_pile.insert(0, card_no)
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="card_moved",
+                player_id=player_id,
+                source_card_no=card_no,
+                metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "trigger_resolution"},
+            ),
+        )
         _record_ability_event(
             state,
             AbilityEvent(
@@ -1647,6 +1709,15 @@ def _discard_first_card_from_hand(state: MatchState, player_id: PlayerId) -> boo
     hand_card_id = player.hand.pop(0)
     card_no, _level = parse_hand_card_id(hand_card_id)
     player.discard_pile.insert(0, card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=card_no,
+            metadata={"from_zone": "hand", "to_zone": "discard", "reason": "discard_effect"},
+        ),
+    )
     return True
 
 
@@ -1657,6 +1728,15 @@ def _discard_hand_card_by_index(state: MatchState, player_id: PlayerId, hand_ind
     hand_card_id = player.hand.pop(hand_index)
     card_no, _level = parse_hand_card_id(hand_card_id)
     player.discard_pile.insert(0, card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=card_no,
+            metadata={"from_zone": "hand", "to_zone": "discard", "reason": "discard_effect"},
+        ),
+    )
     return True
 
 
@@ -1666,6 +1746,15 @@ def _destroy_random_trigger_cards(state: MatchState, player_id: PlayerId, count:
         chosen_index = rng.randrange(len(opponent.trigger_zone))
         card_no = opponent.trigger_zone.pop(chosen_index)
         opponent.discard_pile.insert(0, card_no)
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="card_moved",
+                player_id=opponent.player_id,
+                source_card_no=card_no,
+                metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "trigger_destroyed"},
+            ),
+        )
 
 
 def _can_use_intercept_card(
@@ -1851,6 +1940,16 @@ def _resolve_intercept_effect(
             ),
         )
         state.players[player_id].life -= 1
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="life_changed",
+                player_id=player_id,
+                target_player_id=player_id,
+                source_card_no=card_no,
+                amount=-1,
+            ),
+        )
         _update_winner_by_life(state)
         return
     if card_no == "1-0-096":
@@ -1944,6 +2043,15 @@ def apply_reactive_intercept_action(
     _record_ability_event(
         state,
         AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=used_card_no,
+            metadata={"from_zone": "trigger_zone", "to_zone": "discard", "reason": "intercept_resolution"},
+        ),
+    )
+    _record_ability_event(
+        state,
+        AbilityEvent(
             type="intercept_used",
             player_id=player_id,
             target_player_id=player_id,
@@ -1961,8 +2069,8 @@ def _resolve_happaloid_enter(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    drawn = draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
-    if drawn <= 0:
+    drawn_cards = _draw_card_nos(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    if not drawn_cards:
         return []
     return [
         AbilityEvent(
@@ -1970,7 +2078,8 @@ def _resolve_happaloid_enter(
             player_id=event.player_id,
             target_player_id=event.player_id,
             source_card_no=triggered_ability["card_no"],
-            amount=drawn,
+            amount=len(drawn_cards),
+            metadata={"drawn_card_nos": list(drawn_cards)},
         )
     ]
 
@@ -2130,8 +2239,8 @@ def _resolve_draw_trigger_cards(
         return []
     if not _consume_trigger_card(state, event.player_id, triggered_ability):
         return []
-    drawn = _draw_cards_by_category(state, event.player_id, "trigger", 2)
-    if drawn <= 0:
+    drawn_cards = _draw_cards_by_category(state, event.player_id, "trigger", 2)
+    if not drawn_cards:
         return []
     return [
         AbilityEvent(
@@ -2139,7 +2248,8 @@ def _resolve_draw_trigger_cards(
             player_id=event.player_id,
             target_player_id=event.player_id,
             source_card_no=triggered_ability["card_no"],
-            amount=drawn,
+            amount=len(drawn_cards),
+            metadata={"drawn_card_nos": list(drawn_cards)},
         )
     ]
 
@@ -2155,8 +2265,8 @@ def _resolve_draw_intercept_card(
         return []
     if not _consume_trigger_card(state, event.player_id, triggered_ability):
         return []
-    drawn = _draw_cards_by_category(state, event.player_id, "intercept", 1)
-    if drawn <= 0:
+    drawn_cards = _draw_cards_by_category(state, event.player_id, "intercept", 1)
+    if not drawn_cards:
         return []
     return [
         AbilityEvent(
@@ -2164,7 +2274,8 @@ def _resolve_draw_intercept_card(
             player_id=event.player_id,
             target_player_id=event.player_id,
             source_card_no=triggered_ability["card_no"],
-            amount=drawn,
+            amount=len(drawn_cards),
+            metadata={"drawn_card_nos": list(drawn_cards)},
         )
     ]
 
@@ -2180,8 +2291,8 @@ def _resolve_draw_any_card(
         return []
     if not _consume_trigger_card(state, event.player_id, triggered_ability):
         return []
-    drawn = draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
-    if drawn <= 0:
+    drawn_cards = _draw_card_nos(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+    if not drawn_cards:
         return []
     return [
         AbilityEvent(
@@ -2189,7 +2300,8 @@ def _resolve_draw_any_card(
             player_id=event.player_id,
             target_player_id=event.player_id,
             source_card_no=triggered_ability["card_no"],
-            amount=drawn,
+            amount=len(drawn_cards),
+            metadata={"drawn_card_nos": list(drawn_cards)},
         )
     ]
 
@@ -2223,7 +2335,7 @@ def _resolve_revive_overclock(
         category=None,
     )
     if chosen is not None:
-        _move_discard_to_hand(state, event.player_id, chosen)
+        _move_discard_to_hand(state, event.player_id, chosen, reason="revive")
     return []
 
 
@@ -2243,7 +2355,7 @@ def _resolve_revive_unit_enter(
     if not unit_indexes:
         return []
     chosen_index = rng.choice(unit_indexes)
-    _move_discard_to_hand(state, event.player_id, chosen_index)
+    _move_discard_to_hand(state, event.player_id, chosen_index, reason="revive")
     return []
 
 
@@ -2305,15 +2417,16 @@ def _resolve_grind_draw_enter(
             continue
         used_card = state.card_catalog[used_card_no]
         if _normalize_color(used_card.color) == "green" and (used_card.cp or 0) >= 2:
-            drawn = draw_cards(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
-            if drawn > 0:
+            drawn_cards = _draw_card_nos(state.players[event.player_id], 1, rng, state.regulation.hand_size_limit)
+            if drawn_cards:
                 return [
                     AbilityEvent(
                         type="cards_drawn",
                         player_id=event.player_id,
                         target_player_id=event.player_id,
                         source_card_no=triggered_ability["card_no"],
-                        amount=drawn,
+                        amount=len(drawn_cards),
+                        metadata={"drawn_card_nos": list(drawn_cards)},
                     )
                 ]
             break
@@ -2368,8 +2481,8 @@ def _resolve_intercept_draw_on_destroy(
     rng: random.Random,
     choice_resolver: ChoiceResolver | None = None,
 ) -> list[AbilityEvent]:
-    drawn = _draw_random_cards_by_category(state, event.player_id, "intercept", 1, rng)
-    if drawn <= 0:
+    drawn_cards = _draw_random_cards_by_category(state, event.player_id, "intercept", 1, rng)
+    if not drawn_cards:
         return []
     return [
         AbilityEvent(
@@ -2377,7 +2490,8 @@ def _resolve_intercept_draw_on_destroy(
             player_id=event.player_id,
             target_player_id=event.player_id,
             source_card_no=triggered_ability["card_no"],
-            amount=drawn,
+            amount=len(drawn_cards),
+            metadata={"drawn_card_nos": list(drawn_cards)},
         )
     ]
 
@@ -2456,8 +2570,19 @@ def _resolve_reactive_intercept_effect(
         target = _get_battlefield_unit_by_index(state, enemy_id, int(action["target_index"]))
         if target is None:
             return
+        previous_level = target.level
         target.level = 3
         target.current_damage = 0
+        _record_ability_event(
+            state,
+            AbilityEvent(
+                type="unit_level_changed",
+                player_id=enemy_id,
+                source_unit_id=target.unit_id,
+                source_card_no=target.card_no,
+                metadata={"from_level": previous_level, "to_level": 3, "reason": "effect"},
+            ),
+        )
         return
     if card_no in {"1-0-089", "1-0-092"}:
         _destroy_unit_by_index(state, enemy_id, int(action["target_index"]), rng, choice_resolver)
@@ -2560,7 +2685,7 @@ def _choose_discard_card(
     return discard_index
 
 
-def _move_discard_to_hand(state: MatchState, player_id: PlayerId, discard_index: int) -> bool:
+def _move_discard_to_hand(state: MatchState, player_id: PlayerId, discard_index: int, reason: str = "recover") -> bool:
     player = state.players[player_id]
     if discard_index < 0 or discard_index >= len(player.discard_pile):
         return False
@@ -2568,6 +2693,15 @@ def _move_discard_to_hand(state: MatchState, player_id: PlayerId, discard_index:
         return False
     card_no = player.discard_pile.pop(discard_index)
     player.hand.append(card_no)
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="card_moved",
+            player_id=player_id,
+            source_card_no=card_no,
+            metadata={"from_zone": "discard", "to_zone": "hand", "reason": reason},
+        ),
+    )
     return True
 
 
@@ -2669,15 +2803,30 @@ def _record_card_use(state: MatchState, card_no: str) -> None:
     state.used_card_nos_this_turn.append(card_no)
 
 
+def _set_match_outcome(state: MatchState, winner: str, reason: str) -> None:
+    if state.winner == winner and state.ended_reason == reason:
+        return
+    if state.winner is not None and state.ended_reason is not None:
+        return
+    state.winner = winner
+    state.ended_reason = reason
+    _record_ability_event(
+        state,
+        AbilityEvent(
+            type="match_ended",
+            player_id=winner if winner in {"P1", "P2"} else "P1",
+            target_player_id=winner if winner in {"P1", "P2", "draw"} else None,
+            metadata={"winner": winner, "reason": reason},
+        ),
+    )
+
+
 def _update_winner_by_life(state: MatchState) -> None:
     first_life = state.players["P1"].life
     second_life = state.players["P2"].life
     if first_life <= 0 and second_life <= 0:
-        state.winner = "draw"
-        state.ended_reason = "life_zero"
+        _set_match_outcome(state, "draw", "life_zero")
     elif first_life <= 0:
-        state.winner = "P2"
-        state.ended_reason = "life_zero"
+        _set_match_outcome(state, "P2", "life_zero")
     elif second_life <= 0:
-        state.winner = "P1"
-        state.ended_reason = "life_zero"
+        _set_match_outcome(state, "P1", "life_zero")

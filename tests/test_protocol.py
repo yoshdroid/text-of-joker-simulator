@@ -27,7 +27,7 @@ class ProtocolTest(unittest.TestCase):
     def test_render_event_log_with_event_number(self) -> None:
         rendered = render_event_log(3, "P1", "REQ", "choose_action actions=end_turn,drive", event_no=7)
 
-        self.assertEqual(rendered, "[R03][E007][P1][REQ] choose_action actions=end_turn,drive")
+        self.assertEqual(rendered, "[R03][P1][REQ] choose_action actions=end_turn,drive")
 
     # 選択肢表示は日本語ラベルと理由文を優先することを確認する
     def test_format_choice_prefers_japanese_display(self) -> None:
