@@ -12,8 +12,12 @@ REL_NS = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
 WORKBOOK_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
-def load_cardpool_from_xlsx(path: str | Path) -> list[CardDefinition]:
+def load_cardpool_from_xlsx(
+    path: str | Path,
+    ability_metadata_path: str | Path | None = None,
+) -> list[CardDefinition]:
     workbook_path = Path(path)
+    ability_metadata = _load_ability_metadata(workbook_path, ability_metadata_path)
     with zipfile.ZipFile(workbook_path) as archive:
         shared_strings = _load_shared_strings(archive)
         worksheet = _load_first_worksheet(archive)
@@ -24,10 +28,27 @@ def load_cardpool_from_xlsx(path: str | Path) -> list[CardDefinition]:
 
     header = rows[0]
     return [
-        _build_card(header, row)
+        _build_card(header, row, ability_metadata)
         for row in rows[1:]
         if any(cell != "" for cell in row) and not _is_header_row(header, row)
     ]
+
+
+def _load_ability_metadata(
+    workbook_path: Path,
+    ability_metadata_path: str | Path | None,
+) -> dict[str, dict[str, object]]:
+    metadata_path = Path(ability_metadata_path) if ability_metadata_path is not None else (
+        workbook_path.parent / "carddata" / "ability_metadata.json"
+    )
+    if not metadata_path.exists():
+        return {}
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    cards = data.get("cards")
+    if not isinstance(cards, dict):
+        return {}
+    return {str(card_no): value for card_no, value in cards.items() if isinstance(value, dict)}
 
 
 def _load_shared_strings(archive: zipfile.ZipFile) -> list[str]:
@@ -75,16 +96,22 @@ def _read_rows(worksheet: ET.Element, shared_strings: list[str]) -> list[list[st
     return rows
 
 
-def _build_card(header: list[str], row: list[str]) -> CardDefinition:
+def _build_card(
+    header: list[str],
+    row: list[str],
+    ability_metadata: dict[str, dict[str, object]],
+) -> CardDefinition:
     data = {key: row[index] if index < len(row) else "" for index, key in enumerate(header)}
     abilities_raw = json.loads(data["abilities"]) if data.get("abilities") else []
+    card_metadata = ability_metadata.get(data["no"], {})
+    merged_abilities_raw = _merge_ability_metadata(abilities_raw, card_metadata)
     abilities = tuple(
         AbilityDefinition(
             name=item.get("name", ""),
             text=item.get("text", ""),
             raw=item,
         )
-        for item in abilities_raw
+        for item in merged_abilities_raw
     )
     return CardDefinition(
         card_no=data["no"],
@@ -97,6 +124,30 @@ def _build_card(header: list[str], row: list[str]) -> CardDefinition:
         abilities=abilities,
         race="" if data.get("race", "") == "-" else data.get("race", ""),
     )
+
+
+def _merge_ability_metadata(
+    abilities_raw: list[dict[str, object]],
+    card_metadata: dict[str, object],
+) -> list[dict[str, object]]:
+    metadata_abilities = card_metadata.get("abilities")
+    if not isinstance(metadata_abilities, list):
+        return abilities_raw
+    metadata_by_name = {
+        item.get("name"): item
+        for item in metadata_abilities
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    merged: list[dict[str, object]] = []
+    for ability in abilities_raw:
+        if not isinstance(ability, dict):
+            continue
+        metadata = metadata_by_name.get(ability.get("name"))
+        if isinstance(metadata, dict):
+            merged.append({**ability, **metadata})
+        else:
+            merged.append(ability)
+    return merged
 
 
 def _parse_bp_levels(bp_text: str) -> tuple[int, ...]:

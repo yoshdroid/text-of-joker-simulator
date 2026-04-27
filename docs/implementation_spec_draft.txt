@@ -1,0 +1,448 @@
+Text of Joker Simulator
+実装仕様書 草案 v0.1
+
+目的
+この文書は、現行実装を前提にせず、シミュレータをフルスクラッチで再実装する場合に必要となる入力仕様、内部仕様、外部仕様を整理するための草案である。
+次期バージョン開発時に、仕様不足による手戻りを減らすことを目的とする。
+
+
+1. この文書で定義したいこと
+
+- ゲーム実装のために必要な入力データ
+- ルールエンジンが受け取るイベントと状態
+- カードプール記述方式
+- プレイヤープログラムとの通信仕様
+- 観戦ログ、再生ログ、テストケースの基準
+- 実装前に確定すべき曖昧点
+
+
+2. フルスクラッチ実装時に必要なインプット一覧
+
+2.1 ルール仕様書
+
+最低限、次の内容を機械可読ではなくてもよいので、文章として確定させる。
+
+- 勝敗条件
+- ラウンド進行
+- 先攻/後攻の差異
+- ドロー処理
+- CP処理
+- フィールド制約
+- 各ゾーンの意味
+- 戦闘手順
+- 能力誘発順
+- トリガー/インターセプト優先順位
+- 同時破壊時の順序
+- レベル変動とOC
+- カード移動時の扱い
+- 公開情報/非公開情報
+
+必要理由:
+ルールエンジンのコアは、カード個別効果より前に、共通ルールが完全に定義されている必要がある。
+
+
+2.2 レギュレーション定義ファイル
+
+機械可読 JSON として持つ。
+
+最低限必要な項目:
+
+- deck_size
+- max_copies_per_card
+- max_cp_per_round
+- round_count
+- initial_hand_size
+- hand_size_limit
+- battlefield_unit_limit
+- trigger_zone_limit
+- opening_draws_first
+- opening_draws_second
+- round_start_cp_first
+- round_start_cp_second
+- starting_life_first
+- starting_life_second
+
+追加候補:
+
+- mulligan_enabled
+- first_player_attack_restricted_rounds
+- deck_rebuild_policy
+- allow_zero_cost_after_reduction
+
+
+2.3 カードプール定義
+
+もっとも重要な入力。
+Excel 由来でもよいが、実装用には最終的に JSON 化した正規フォーマットを持つべき。
+
+1枚ごとに最低限必要な項目:
+
+- card_no
+- name
+- category
+- color
+- cp
+- race
+- bp_by_level
+- abilities
+
+abilities の1要素に最低限必要な項目:
+
+- name
+- trigger_condition
+- effect_steps
+- target_rule
+- cost_rule
+- optionality
+- timing_band
+
+補足:
+現状は abilities.name と text に依存する場面があるが、次版では text の自由記述だけで起動条件判断しない方がよい。
+能力は構造化データとして扱うことを推奨する。
+
+
+2.4 効果辞書
+
+カード個別 JSON と別に、「効果の部品」を辞書として整理すると再利用しやすい。
+
+例:
+
+- deal_damage_to_unit
+- deal_life_damage
+- draw_cards
+- draw_random_category_card
+- draw_specific_category_card
+- discard_from_hand
+- revive_from_discard
+- move_card_between_zones
+- modify_bp_temporary
+- modify_bp_permanent
+- set_level
+- clock_up
+- recover_action
+- remove_attack_restriction
+- destroy_unit
+
+必要理由:
+カード個別効果を毎回 Python の分岐で直接書くより、効果ステップを DSL 的に記述しやすくなる。
+
+
+2.5 イベント定義表
+
+ゲーム中に発生するイベントを一覧として定義する。
+
+最低限必要なイベント:
+
+- turn_started
+- turn_start_draw
+- turn_start_cp_set
+- turn_end
+- unit_driven
+- unit_entered
+- opponent_unit_entered
+- unit_attacked
+- opponent_unit_attacked
+- block_declared
+- battle_started
+- player_attack_success
+- unit_destroyed
+- unit_sent_to_discard
+- unit_clock_up
+- unit_overclocked
+- unit_level_changed
+- unit_action_recovered
+- cards_drawn
+- cp_changed
+- life_changed
+- trigger_used
+- intercept_used
+- card_moved
+- match_ended
+
+各イベントに必要な属性:
+
+- type
+- player_id
+- target_player_id
+- source_card_no
+- source_unit_id
+- amount
+- metadata
+- round_no
+- turn_serial
+- event_no
+
+設計方針:
+観戦ログ用と内部処理用を分けず、まず内部イベントを正とし、表示はその投影にする。
+
+
+2.6 契機対応表
+
+カードの能力名とゲームイベントを1対1または1対多で対応させる表を用意する。
+
+例:
+
+- 「あなたのユニットがフィールドに出たとき」 -> unit_entered
+- 「対戦相手のユニットがフィールドに出たとき」 -> opponent_unit_entered
+- 「あなたのユニットがアタックしたとき」 -> unit_attacked
+- 「対戦相手のユニットがアタックしたとき」 -> opponent_unit_attacked
+- 「ターン終了時」 -> turn_end
+- 「あなたのターン終了時」 -> turn_end かつ owner == turn_player
+- 「破壊されたとき」 -> unit_destroyed
+
+必要理由:
+能力テキストと起動条件の対応を、実装者の解釈に依存させないため。
+
+
+2.7 優先順位仕様
+
+本文ではなく、処理手順として明文化する。
+
+最低限定義するもの:
+
+- ユニット効果の優先帯
+- トリガー効果の優先帯
+- インターセプト効果の優先帯
+- 発動権の交互移動
+- 発動不能時のパス
+- 同一契機内の順序
+- 破壊時割り込み
+- OC効果の後置処理
+
+望ましい形:
+疑似コードまたは状態遷移図で表現する。
+
+
+2.8 プレイヤープログラム通信仕様
+
+stdio/JSON Lines を基準に定義する。
+
+最低限必要な request:
+
+- hello
+- deck_submit
+- mulligan_decision
+- state_update
+- request_action
+- choice_request
+- game_over
+
+最低限必要な response:
+
+- hello_response
+- deck_submit_response
+- mulligan_decision_response
+- action_response
+- choice_response
+
+各メッセージに必要な共通属性:
+
+- request_id
+- type
+- round_no
+- turn_serial
+- visible_state_version
+
+注意:
+表示用ログと通信フォーマットは分離する。
+通信は堅牢性優先、表示は観戦性優先にする。
+
+
+2.9 可視状態仕様
+
+各プレイヤーに見えてよい情報を定義する。
+
+自分に見えるもの:
+
+- 自手札
+- 自場詳細
+- 自捨札
+- 自トリガー詳細
+
+相手に見えるもの:
+
+- 相手手札枚数
+- 相手場詳細
+- 相手捨札
+- 相手トリガーの色
+- 相手トリガーの位置情報
+
+必要理由:
+state_update 生成時に、何をマスクするかを機械的に判定できるようにするため。
+
+
+2.10 ログ仕様
+
+少なくとも3種類を分けて定義する。
+
+- internal event log
+- player communication log
+- rendered spectator log
+
+internal event log に必要な要件:
+
+- 順序が一意
+- 再生可能
+- 状態変化が復元可能
+
+rendered spectator log に必要な要件:
+
+- 人間が読める
+- 重複しない
+- 1行で意味が分かる
+
+
+2.11 テストケース仕様
+
+ユニットテストだけでなく、仕様テストを文章で持つべき。
+
+推奨分類:
+
+- battle testcase
+- effect testcase
+- trigger testcase
+- intercept testcase
+- priority testcase
+- replay testcase
+
+1ケースに最低限必要な記述:
+
+- case id
+- 初期盤面
+- 山札/手札/捨札/トリガー内容
+- 実行アクション
+- 期待イベント列
+- 期待最終状態
+
+
+3. フルスクラッチ実装で最初に固定すべき設計方針
+
+3.1 カード効果は text ではなく構造化定義を正とする
+
+text は表示用にし、起動条件や効果解決は JSON の構造フィールドを用いる。
+
+
+3.2 すべての盤面変化はイベントを経由する
+
+直接 state を書き換えるのではなく、
+
+- state mutation
+- event emission
+
+をセットで行う。
+
+対象:
+
+- ドロー
+- CP変化
+- ライフ変化
+- ダメージ
+- 破壊
+- 捨札移動
+- レベル変化
+- 行動権回復
+- トリガー使用
+- インターセプト使用
+
+
+3.3 イベント定義表を中心に能力解決器を設計する
+
+if 文の増殖ではなく、イベント定義に
+
+- 収集対象
+- 優先帯
+- opponent_ 契機
+- intercept window
+
+を持たせる。
+
+
+3.4 通信層とゲーム本体を分離する
+
+ゲーム本体は「choice_resolver を呼ぶ純粋寄りのエンジン」とし、
+stdio 処理は外側に置く。
+
+必要理由:
+
+- 単体テストしやすい
+- bot 以外の UI に流用しやすい
+- リプレイ再生に使いやすい
+
+
+3.5 観戦ログは event_log から生成する
+
+state_update 差分から推測して表示を作ると重複や順序ズレが起きやすい。
+表示は internal event log のみを材料にする方がよい。
+
+
+4. 実装前に確定しておくとよい曖昧点
+
+- 「戦闘した時」と「ブロックした時」の厳密な同一契機扱い
+- 1枚のカードに複数能力がある場合の内部識別子
+- 任意効果と強制効果の表現方式
+- 「そうした場合」のコスト支払い表現
+- 効果対象が不適正なときの発動可否
+- 同時破壊時の全パターン
+- deck rebuild 時の順序/乱数責務
+- 公開情報としての捨札順序
+- 将来追加されるキーワード能力の登録方式
+
+
+5. 推奨ファイル構成草案
+
+- configs/
+  - regulation.default.json
+  - decks/
+- carddata/
+  - cards.json
+  - abilities.json
+  - trigger_conditions.json
+- docs/
+  - implementation_spec_draft.txt
+  - rule_priority.md
+  - protocol.md
+  - testcase_catalog.md
+- src/tojs/
+  - engine/
+    - events.py
+    - state.py
+    - resolver.py
+    - priority.py
+    - effects.py
+    - selectors.py
+  - io/
+    - protocol.py
+    - player_runner.py
+  - bots/
+  - cli/
+
+
+6. 次期バージョン開始時の推奨手順
+
+1. ルール文章を確定する
+2. イベント一覧を確定する
+3. カード JSON の構造を確定する
+4. 契機対応表を確定する
+5. レギュレーション JSON を確定する
+6. 通信仕様を確定する
+7. 直接 testcase を先に書く
+8. その後でゲームエンジンを実装する
+
+
+7. この草案の用途
+
+- 次版アーキテクチャ検討のたたき台
+- カード JSON 正規化の入力要件整理
+- 仕様未確定箇所の洗い出し
+- テストケース設計の前提資料
+
+
+8. 今後この文書に追記したいもの
+
+- ability JSON の具体例
+- effect_steps DSL 案
+- choice_request payload 正規形
+- replay file format
+- 乱数責務の定義
+- 破壊時割り込みの疑似コード
+- 戦闘解決フローチャート

@@ -1,6 +1,8 @@
 ﻿import random
 import unittest
 
+import tojs.game as game_module
+
 from tojs.game import (
     AbilityEvent,
     UnitState,
@@ -8,9 +10,9 @@ from tojs.game import (
     apply_attack_action,
     apply_intercept_action,
     apply_reactive_intercept_action,
+    build_reactive_intercept_choice_payload,
     build_block_choice_payload,
     build_intercept_choice_payload,
-    build_reactive_intercept_choice_payload,
     build_state_update_payload,
     create_match_state,
     get_event_definition,
@@ -226,9 +228,53 @@ class GameStateTest(unittest.TestCase):
         self.assertTrue(unit_entered.collect_unit_abilities)
         self.assertTrue(unit_entered.collect_trigger_abilities)
         self.assertTrue(unit_entered.unit_ability_source_only)
+        self.assertEqual(unit_entered.opponent_event_type, "opponent_unit_entered")
 
         self.assertEqual(unit_destroyed.collection_mode, "destroyed_source")
         self.assertEqual(unit_destroyed.source_zone, "graveyard")
+
+    # 相手ユニットの登場は opponent_unit_entered として相手側ユニット能力に渡されることを確認する。
+    def test_opponent_prefixed_unit_enter_event_is_collected_for_opponent_side(self) -> None:
+        state = self.create_state()
+        state.card_catalog["9-0-001"] = CardDefinition(
+            card_no="9-0-001",
+            category="unit",
+            rarity="R",
+            color="yellow",
+            name="Opponent Enter Watcher",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(AbilityDefinition(name="見張り", text=""),),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="9-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+        state.players["P2"].battlefield = [
+            UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        registry_key = ("9-0-001", "opponent_unit_entered")
+        original_resolver = game_module.ABILITY_REGISTRY.get(registry_key)
+        game_module.ABILITY_REGISTRY[registry_key] = (
+            lambda state, event, triggered_ability, rng, choice_resolver=None: []
+        )
+        try:
+            resolve_ability_events(
+                state,
+                [AbilityEvent(type="unit_entered", player_id="P2", source_unit_id=2)],
+                random.Random(7),
+            )
+        finally:
+            if original_resolver is None:
+                del game_module.ABILITY_REGISTRY[registry_key]
+            else:
+                game_module.ABILITY_REGISTRY[registry_key] = original_resolver
+
+        ability_triggered = next(event for event in state.event_log if event["type"] == "ability_triggered")
+        self.assertEqual(ability_triggered["player_id"], "P1")
+        self.assertEqual(ability_triggered["source_card_no"], "9-0-001")
+        self.assertEqual(ability_triggered["metadata"]["event_type"], "opponent_unit_entered")
 
     # 必要ドロー枚数がデッキ残枚数を上回る場合は、残りデッキを先に引かず、捨札を混ぜた新デッキから引くことを確認する
     def test_draw_rebuilds_deck_before_drawing(self) -> None:
@@ -604,6 +650,93 @@ class GameStateTest(unittest.TestCase):
         self.assertEqual(trigger_event["source_card_no"], "1-0-040")
         self.assertEqual(trigger_event["metadata"]["ability_name"], "ハッパロイド")
 
+    # abilities.raw の event_type 指定がある場合、その能力名を優先して表示することを確認する。
+    def test_unit_ability_trigger_prefers_raw_event_type_match(self) -> None:
+        state = self.create_state()
+        state.card_catalog["9-0-002"] = CardDefinition(
+            card_no="9-0-002",
+            category="unit",
+            rarity="R",
+            color="red",
+            name="Dual Trigger Unit",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(
+                AbilityDefinition(name="登場反応", text="", raw={"event_type": "unit_entered"}),
+                AbilityDefinition(name="相手登場反応", text="", raw={"event_type": "opponent_unit_entered"}),
+            ),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="9-0-002", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        registry_key = ("9-0-002", "opponent_unit_entered")
+        original_resolver = game_module.ABILITY_REGISTRY.get(registry_key)
+        game_module.ABILITY_REGISTRY[registry_key] = (
+            lambda state, event, triggered_ability, rng, choice_resolver=None: []
+        )
+        try:
+            resolve_ability_events(
+                state,
+                [AbilityEvent(type="unit_entered", player_id="P2", source_unit_id=3)],
+                random.Random(7),
+            )
+        finally:
+            if original_resolver is None:
+                del game_module.ABILITY_REGISTRY[registry_key]
+            else:
+                game_module.ABILITY_REGISTRY[registry_key] = original_resolver
+
+        trigger_event = next(event for event in state.event_log if event["type"] == "ability_triggered")
+        self.assertEqual(trigger_event["metadata"]["ability_name"], "相手登場反応")
+        self.assertEqual(trigger_event["metadata"]["event_type"], "opponent_unit_entered")
+
+    # raw の event_type が宣言されている場合、その契機以外では resolver が存在しても候補収集しないことを確認する。
+    def test_declared_event_type_blocks_non_matching_trigger_collection(self) -> None:
+        state = self.create_state()
+        state.card_catalog["9-0-003"] = CardDefinition(
+            card_no="9-0-003",
+            category="unit",
+            rarity="R",
+            color="red",
+            name="Declared Event Unit",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(
+                AbilityDefinition(name="相手登場反応", text="", raw={"event_type": "opponent_unit_entered"}),
+            ),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="9-0-003", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ]
+
+        unit_enter_key = ("9-0-003", "unit_entered")
+        opponent_enter_key = ("9-0-003", "opponent_unit_entered")
+        original_unit_enter = game_module.ABILITY_REGISTRY.get(unit_enter_key)
+        original_opponent_enter = game_module.ABILITY_REGISTRY.get(opponent_enter_key)
+        resolver = lambda state, event, triggered_ability, rng, choice_resolver=None: []
+        game_module.ABILITY_REGISTRY[unit_enter_key] = resolver
+        game_module.ABILITY_REGISTRY[opponent_enter_key] = resolver
+        try:
+            resolve_ability_events(
+                state,
+                [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=1)],
+                random.Random(7),
+            )
+        finally:
+            if original_unit_enter is None:
+                del game_module.ABILITY_REGISTRY[unit_enter_key]
+            else:
+                game_module.ABILITY_REGISTRY[unit_enter_key] = original_unit_enter
+            if original_opponent_enter is None:
+                del game_module.ABILITY_REGISTRY[opponent_enter_key]
+            else:
+                game_module.ABILITY_REGISTRY[opponent_enter_key] = original_opponent_enter
+
+        self.assertEqual([event for event in state.event_log if event["type"] == "ability_triggered"], [])
+
     # 何でも屋の陳列台を trigger_zone に置いた時、自分のユニット登場で 1 枚ドローすることを確認する。
     def test_trigger_zone_field_enter_ability_draws_card(self) -> None:
         state = self.create_state()
@@ -862,7 +995,7 @@ class GameStateTest(unittest.TestCase):
             card_no="1-0-045",
             category="unit",
             rarity="R",
-            color="green",
+            color="red",
             name="Leafia",
             cp=3,
             bp_by_level=(6, 7, 8),
@@ -1559,7 +1692,7 @@ class GameStateTest(unittest.TestCase):
             card_no="1-0-021",
             category="unit",
             rarity="R",
-            color="yellow",
+            color="red",
             name="Untiring Unit",
             cp=2,
             bp_by_level=(4, 5, 6),
@@ -1574,6 +1707,34 @@ class GameStateTest(unittest.TestCase):
         resolve_ability_events(
             state,
             [AbilityEvent(type="turn_end", player_id="P2")],
+            random.Random(7),
+        )
+
+        self.assertTrue(state.players["P1"].battlefield[0].exhausted)
+        self.assertEqual([event for event in state.event_log if event["type"] == "ability_triggered"], [])
+        self.assertEqual([event for event in state.event_log if event["type"] == "unit_action_recovered"], [])
+
+    # 不屈が別契機を宣言している場合、turn_end では候補収集されないことを確認する。
+    def test_untiring_respects_declared_event_type(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-021"] = CardDefinition(
+            card_no="1-0-021",
+            category="unit",
+            rarity="R",
+            color="yellow",
+            name="Untiring Unit",
+            cp=2,
+            bp_by_level=(4, 5, 6),
+            abilities=(AbilityDefinition(name="不屈", text="", raw={"event_type": "opponent_turn_end"}),),
+            race="test",
+        )
+        state.players["P1"].battlefield = [
+            UnitState(card_no="1-0-021", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        ]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="turn_end", player_id="P1")],
             random.Random(7),
         )
 
@@ -1928,7 +2089,7 @@ class GameStateTest(unittest.TestCase):
             card_no="1-0-043",
             category="unit",
             rarity="R",
-            color="green",
+            color="red",
             name="Grind Beetle",
             cp=3,
             bp_by_level=(5, 6, 7),
@@ -2046,6 +2207,383 @@ class GameStateTest(unittest.TestCase):
 
         self.assertEqual(len(state.players["P2"].battlefield), 1)
 
+    # 戦闘勝利時のトリガーが battle_won 契機で発動し、CP が増えることを確認する。
+    def test_battle_won_trigger_gains_cp(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-060"] = CardDefinition(
+            card_no="1-0-060",
+            category="trigger",
+            rarity="R",
+            color="green",
+            name="Advance Energy",
+            cp=None,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="アドバンスエネルギー", text=""),),
+            race="test",
+        )
+        start_turn(state, "P1", random.Random(7))
+        state.round_no = 2
+        attacker = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False, current_damage=1000)
+        state.players["P1"].battlefield = [attacker]
+        state.players["P2"].battlefield = [blocker]
+        state.players["P1"].trigger_zone = ["1-0-060"]
+        state.players["P1"].current_cp = 2
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0, "target": "player"},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+        )
+
+        self.assertEqual(state.players["P1"].current_cp, 4)
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertTrue(any(event["type"] == "battle_won" for event in state.event_log))
+        self.assertTrue(any(event["type"] == "cp_changed" and event["source_card_no"] == "1-0-060" for event in state.event_log))
+
+    # ベヒーモスドラゴンのアタック時効果が自分の捨札枚数×500ぶんのBP上昇を与えることを確認する。
+    def test_attack_trigger_uses_discard_count_for_temp_bp(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-011", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P1"].discard_pile = ["1-0-001", "1-0-002", "1-0-003"]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_attacked", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual(source.temporary_bp_modifier, 1500)
+
+    # 疑惑のロシアンルーレットがアタック後にランダムなBP上昇を与えることを確認する。
+    def test_attack_trigger_grants_random_temp_bp(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P1"].trigger_zone = ["1-0-059"]
+        state.card_catalog["1-0-059"] = CardDefinition(
+            card_no="1-0-059",
+            category="trigger",
+            rarity="R",
+            color="none",
+            name="Russian Roulette",
+            cp=None,
+            bp_by_level=(),
+            abilities=(),
+            race="test",
+        )
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_attacked", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertIn(source.temporary_bp_modifier, {1000, 3000, 4000})
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+
+    # サイボーグ僧兵のブロック時効果が戦闘開始時に発動してBPを上げることを確認する。
+    def test_cyborg_soldier_block_bonus_applies_on_battle_started(self) -> None:
+        state = self.create_state()
+        blocker = UnitState(card_no="1-0-015", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        attacker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [blocker]
+        state.players["P2"].battlefield = [attacker]
+
+        resolve_ability_events(
+            state,
+            [
+                AbilityEvent(
+                    type="battle_started",
+                    player_id="P2",
+                    source_unit_id=attacker.unit_id,
+                    target_player_id="P1",
+                    metadata={"blocker_player_id": "P1", "blocker_unit_id": blocker.unit_id},
+                )
+            ],
+            random.Random(7),
+        )
+
+        self.assertEqual(blocker.temporary_bp_modifier, 2000)
+
+    # 湖畔のアリエの登場時効果が相手ユニットを行動済みにすることを確認する。
+    def test_enter_ability_can_exhaust_enemy_unit(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-017", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        enemy = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P2"].battlefield = [enemy]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertTrue(enemy.exhausted)
+
+    # ジャンプーの登場時効果が相手ユニットを手札に戻すことを確認する。
+    def test_enter_ability_can_return_enemy_unit_to_hand(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-019", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        enemy = UnitState(card_no="2-0-001", unit_id=2, level=2, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P2"].battlefield = [enemy]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual(state.players["P2"].battlefield, [])
+        self.assertIn("2-0-001", state.players["P2"].hand)
+
+    # ラグエルの登場時効果が相手の行動済みユニット全てにダメージを与えることを確認する。
+    def test_enter_ability_damages_all_exhausted_enemy_units(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-023", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        exhausted_enemy = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=True, attack_restricted=False)
+        ready_enemy = UnitState(card_no="2-0-002", unit_id=3, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P2"].battlefield = [exhausted_enemy, ready_enemy]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual(exhausted_enemy.current_damage, 3000)
+        self.assertEqual(ready_enemy.current_damage, 0)
+
+    # 戦神・毘沙門の登場時効果が自分以外の全ユニットを破壊することを確認する。
+    def test_enter_ability_destroys_all_other_units(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-026", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        ally = UnitState(card_no="1-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        enemy = UnitState(card_no="2-0-001", unit_id=3, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source, ally]
+        state.players["P2"].battlefield = [enemy]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual([unit.unit_id for unit in state.players["P1"].battlefield], [source.unit_id])
+        self.assertEqual(state.players["P2"].battlefield, [])
+
+    # 中忍月影のプレイヤーアタック成功時効果が相手手札を1枚ランダムで捨てることを確認する。
+    def test_player_attack_success_can_random_discard_opponent_hand(self) -> None:
+        state = self.create_state()
+        source = UnitState(card_no="1-0-032", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P2"].hand = ["2-0-001", "2-0-002"]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="player_attack_success", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual(len(state.players["P2"].hand), 1)
+        self.assertEqual(len(state.players["P2"].discard_pile), 1)
+
+    # メガジョーの登場時効果が4色条件を満たす時だけ基本BPを上げることを確認する。
+    def test_enter_ability_checks_all_four_colors(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-038"] = CardDefinition(
+            card_no="1-0-038",
+            category="unit",
+            rarity="C",
+            color="green",
+            name="Mega Jaw",
+            cp=3,
+            bp_by_level=(6, 7, 8),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-015"] = CardDefinition(
+            card_no="1-0-015",
+            category="unit",
+            rarity="C",
+            color="yellow",
+            name="Yellow Helper",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-032"] = CardDefinition(
+            card_no="1-0-032",
+            category="unit",
+            rarity="C",
+            color="blue",
+            name="Blue Helper",
+            cp=2,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        state.card_catalog["1-0-041"] = CardDefinition(
+            card_no="1-0-041",
+            category="unit",
+            rarity="C",
+            color="green",
+            name="Green Helper",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        source = UnitState(card_no="1-0-038", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        red = UnitState(card_no="1-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        yellow = UnitState(card_no="1-0-015", unit_id=3, level=1, exhausted=False, attack_restricted=False)
+        blue = UnitState(card_no="1-0-032", unit_id=4, level=1, exhausted=False, attack_restricted=False)
+        green = UnitState(card_no="1-0-041", unit_id=5, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source, red, yellow, blue, green]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual(source.permanent_bp_modifier, 4000)
+
+    # ケロール・キッドのOC効果が相手ユニットの基本BPを下げることを確認する。
+    def test_overclock_ability_reduces_enemy_basic_bp(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-042"] = CardDefinition(
+            card_no="1-0-042",
+            category="unit",
+            rarity="C",
+            color="green",
+            name="Kerole Kid",
+            cp=1,
+            bp_by_level=(3, 4, 5),
+            abilities=(),
+            race="test",
+        )
+        source = UnitState(card_no="1-0-042", unit_id=1, level=3, exhausted=False, attack_restricted=False)
+        enemy = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P2"].battlefield = [enemy]
+
+        resolve_ability_events(
+            state,
+            [AbilityEvent(type="unit_overclocked", player_id="P1", source_unit_id=source.unit_id, source_card_no=source.card_no)],
+            random.Random(7),
+        )
+
+        self.assertEqual(enemy.permanent_bp_modifier, -3000)
+
+    # ブロックされないユニットはブロック宣言を受けてもプレイヤーアタックになることを確認する。
+    def test_unblockable_unit_ignores_block_action(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-008"] = CardDefinition(
+            card_no="1-0-008",
+            category="unit",
+            rarity="R",
+            color="red",
+            name="Valkyrie Clara",
+            cp=3,
+            bp_by_level=(3, 4, 5),
+            abilities=(AbilityDefinition(name="聖女の加護", text="このユニットはブロックされない。"),),
+            race="test",
+        )
+        attacker = UnitState(card_no="1-0-008", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        blocker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [attacker]
+        state.players["P2"].battlefield = [blocker]
+        state.round_no = 2
+
+        apply_attack_action(
+            state,
+            "P1",
+            {"kind": "attack", "attacker_index": 0},
+            {"kind": "block", "blocker_index": 0},
+            random.Random(7),
+        )
+
+        self.assertEqual(state.players["P2"].life, 6)
+        self.assertEqual(blocker.current_damage, 0)
+
+    # 対戦相手のアタック時インターセプトが opponent_unit_attacked 契機で行動権を回復することを確認する。
+    def test_opponent_unit_attacked_intercept_recovers_friendly_actions(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-100"] = CardDefinition(
+            card_no="1-0-100",
+            category="intercept",
+            rarity="R",
+            color="red",
+            name="Great Tornado of Reversal",
+            cp=0,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="逆転の大竜巻", text="", raw={"event_type": "opponent_unit_attacked"}),),
+            race="test",
+        )
+        exhausted_unit = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=True, attack_restricted=False)
+        enemy_attacker = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [exhausted_unit]
+        state.players["P1"].trigger_zone = ["1-0-100"]
+        state.players["P2"].battlefield = [enemy_attacker]
+
+        event = AbilityEvent(type="unit_attacked", player_id="P2", source_unit_id=enemy_attacker.unit_id, target_player_id="P1")
+        payload = build_reactive_intercept_choice_payload(state, "P1", event)
+        chosen = next(choice for choice in payload["available_choices"] if choice["kind"] == "use_intercept")
+        apply_reactive_intercept_action(
+            state,
+            "P1",
+            chosen,
+            event,
+            random.Random(7),
+        )
+
+        self.assertFalse(exhausted_unit.exhausted)
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertTrue(any(event["type"] == "unit_action_recovered" and event["source_card_no"] == "1-0-100" for event in state.event_log))
+
+    # 登場時インターセプトが unit_entered 契機で発動し、ダメージと捨札移動を行うことを確認する。
+    def test_field_enter_intercept_deals_damage(self) -> None:
+        state = self.create_state()
+        state.card_catalog["1-0-077"] = CardDefinition(
+            card_no="1-0-077",
+            category="intercept",
+            rarity="R",
+            color="red",
+            name="Armor Break",
+            cp=0,
+            bp_by_level=(),
+            abilities=(AbilityDefinition(name="アーマーブレイク", text="", raw={"event_type": "unit_entered"}),),
+            race="test",
+        )
+        source = UnitState(card_no="1-0-001", unit_id=1, level=1, exhausted=False, attack_restricted=False)
+        target = UnitState(card_no="2-0-001", unit_id=2, level=1, exhausted=False, attack_restricted=False)
+        state.players["P1"].battlefield = [source]
+        state.players["P1"].trigger_zone = ["1-0-077"]
+        state.players["P2"].battlefield = [target]
+
+        event = AbilityEvent(type="unit_entered", player_id="P1", source_unit_id=source.unit_id, target_player_id="P2")
+        payload = build_reactive_intercept_choice_payload(state, "P1", event)
+        chosen = next(choice for choice in payload["available_choices"] if choice["kind"] == "use_intercept")
+        apply_reactive_intercept_action(
+            state,
+            "P1",
+            chosen,
+            event,
+            random.Random(7),
+        )
+
+        self.assertEqual(target.current_damage, 3000)
+        self.assertEqual(state.players["P1"].trigger_zone, [])
+        self.assertTrue(any(event["type"] == "ability_damage_dealt_to_unit" and event["source_card_no"] == "1-0-077" for event in state.event_log))
+
     # 破壊時誘発によりロストで相手手札を捨てさせ、インターセプトドローで1枚引くことを確認する。
     def test_unit_destroyed_abilities_can_discard_opponent_and_draw_intercept(self) -> None:
         state = self.create_state()
@@ -2161,9 +2699,10 @@ class GameStateTest(unittest.TestCase):
             UnitState(card_no="2-0-001", unit_id=1, level=1, exhausted=True, attack_restricted=True)
         ]
 
-        payload = build_reactive_intercept_choice_payload(state, "P1", "unit_entered")
+        enter_event = AbilityEvent(type="unit_entered", player_id="P2", source_unit_id=1)
+        payload = build_reactive_intercept_choice_payload(state, "P1", enter_event)
         action = next(choice for choice in payload["available_choices"] if choice.get("kind") == "use_intercept")
-        apply_reactive_intercept_action(state, "P1", action, "unit_entered")
+        apply_reactive_intercept_action(state, "P1", action, enter_event)
 
         self.assertEqual(state.players["P2"].battlefield[0].level, 3)
         self.assertTrue(state.players["P2"].battlefield[0].exhausted)
@@ -2250,8 +2789,7 @@ class GameStateTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["available_choices"][0]["kind"], "no_intercept")
-        self.assertEqual(payload["unavailable_choices"][0]["card_no"], "1-0-089")
-        self.assertEqual(payload["unavailable_choices"][0]["disabled_reason"], "attacker_only")
+        self.assertEqual(payload["unavailable_choices"], [])
 
     # ダーク・アーマーは自ユニットにBP+7000し、自分のライフを1減らすことを確認する。
     def test_battle_intercept_dark_armor_adds_bp_and_costs_life(self) -> None:

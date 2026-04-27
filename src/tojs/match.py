@@ -14,6 +14,7 @@ from .game import (
     create_match_state,
     declare_attack_action,
     get_unit_bp,
+    is_unit_unblockable,
     list_available_actions,
     list_available_block_actions,
     resolve_declared_attack_action,
@@ -153,9 +154,13 @@ def play_single_action_cycle(
         block_actions = list_available_block_actions(state, defender_id)
         block_payload = {"kind": "no_block"}
         block_choice_payload = build_block_choice_payload(state, defender_id)
+        attacker = state.players[actor_id].battlefield[action_response.payload["attacker_index"]]
         if (
+            not is_unit_unblockable(state, attacker)
+            and (
             any(action.get("kind") == "block" for action in block_actions)
             or block_choice_payload.get("unavailable_choices")
+            )
         ):
             block_payload = choice_resolver(defender_id, block_choice_payload)
 

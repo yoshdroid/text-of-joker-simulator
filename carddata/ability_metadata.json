@@ -1,0 +1,526 @@
+{
+  "cards": {
+    "1-0-001": {
+      "abilities": [
+        {
+          "name": "ダメージブレイク",
+          "event_type": "unit_overclocked"
+        }
+      ]
+    },
+    "1-0-002": {
+      "abilities": [
+        {
+          "name": "アタッカー",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-003": {
+      "abilities": [
+        {
+          "name": "ドッカーンッ！",
+          "event_type": "unit_overclocked"
+        }
+      ]
+    },
+    "1-0-004": {
+      "abilities": [
+        {
+          "name": "ダメージブレイク",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-005": {
+      "abilities": [
+        {
+          "name": "トリガーロスト",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-007": {
+      "abilities": [
+        {
+          "name": "マグニボム",
+          "event_type": "unit_overclocked"
+        }
+      ]
+    },
+    "1-0-010": {
+      "abilities": [
+        {
+          "name": "地獄剣",
+          "event_types": [
+            "unit_attacked",
+            "player_attack_success"
+          ]
+        }
+      ]
+    },
+    "1-0-012": {
+      "abilities": [
+        {
+          "name": "デーモンスピア",
+          "event_types": [
+            "unit_entered",
+            "unit_attacked"
+          ]
+        }
+      ]
+    },
+    "1-0-013": {
+      "abilities": [
+        {
+          "name": "憤怒の炎",
+          "event_type": "unit_entered"
+        },
+        {
+          "name": "ダメージブレイク",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-014": {
+      "abilities": [
+        {
+          "name": "リブート",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-016": {
+      "abilities": [
+        {
+          "name": "ウェイト",
+          "event_type": "unit_overclocked"
+        }
+      ]
+    },
+    "1-0-018": {
+      "abilities": [
+        {
+          "name": "ダメージブレイク",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-020": {
+      "abilities": [
+        {
+          "name": "トリガードロー",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-021": {
+      "abilities": [
+        {
+          "name": "不屈",
+          "event_type": "turn_end"
+        }
+      ]
+    },
+    "1-0-024": {
+      "abilities": [
+        {
+          "name": "サンダーボルト",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-027": {
+      "abilities": [
+        {
+          "name": "ロスト",
+          "event_type": "unit_destroyed"
+        }
+      ]
+    },
+    "1-0-028": {
+      "abilities": [
+        {
+          "name": "リバイブ",
+          "event_type": "unit_destroyed"
+        }
+      ]
+    },
+    "1-0-029": {
+      "abilities": [
+        {
+          "name": "インターセプトドロー",
+          "event_type": "unit_destroyed"
+        }
+      ]
+    },
+    "1-0-030": {
+      "abilities": [
+        {
+          "name": "デリート",
+          "event_type": "unit_overclocked"
+        }
+      ]
+    },
+    "1-0-031": {
+      "abilities": [
+        {
+          "name": "リバイブ",
+          "event_type": "unit_overclocked"
+        }
+      ]
+    },
+    "1-0-033": {
+      "abilities": [
+        {
+          "name": "リバイブ",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-034": {
+      "abilities": [
+        {
+          "name": "死への誘い",
+          "event_type": "unit_destroyed"
+        }
+      ]
+    },
+    "1-0-036": {
+      "abilities": [
+        {
+          "name": "デリート",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-039": {
+      "abilities": [
+        {
+          "name": "血塗られし報復",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-040": {
+      "abilities": [
+        {
+          "name": "ドロー",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-043": {
+      "abilities": [
+        {
+          "name": "チャージ",
+          "event_type": "unit_entered"
+        },
+        {
+          "name": "連撃・グラインドドロー",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-044": {
+      "abilities": [
+        {
+          "name": "不屈",
+          "event_type": "turn_end"
+        }
+      ]
+    },
+    "1-0-045": {
+      "abilities": [
+        {
+          "name": "ブロッカー",
+          "event_type": "battle_started"
+        }
+      ]
+    },
+    "1-0-047": {
+      "abilities": [
+        {
+          "name": "チャージ",
+          "event_type": "unit_entered"
+        },
+        {
+          "name": "ドロー",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-048": {
+      "abilities": [
+        {
+          "name": "不屈",
+          "event_type": "turn_end"
+        }
+      ]
+    },
+    "1-0-050": {
+      "abilities": [
+        {
+          "name": "無条件移動",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-051": {
+      "abilities": [
+        {
+          "name": "バルバトスの強弓",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-053": {
+      "abilities": [
+        {
+          "name": "ロデオドライヴ",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-054": {
+      "abilities": [
+        {
+          "name": "ベーシックキャノン",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-055": {
+      "abilities": [
+        {
+          "name": "タイムブレイク",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-056": {
+      "abilities": [
+        {
+          "name": "不穏な霧",
+          "event_type": "unit_destroyed"
+        }
+      ]
+    },
+    "1-0-057": {
+      "abilities": [
+        {
+          "name": "サプライズボックス",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-058": {
+      "abilities": [
+        {
+          "name": "暗殺部隊",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-060": {
+      "abilities": [
+        {
+          "name": "アドバンスエネルギー",
+          "event_type": "battle_won"
+        }
+      ]
+    },
+    "1-0-061": {
+      "abilities": [
+        {
+          "name": "新品の鎧",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-062": {
+      "abilities": [
+        {
+          "name": "何でも屋の陳列台",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-063": {
+      "abilities": [
+        {
+          "name": "マネーゲーム",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-064": {
+      "abilities": [
+        {
+          "name": "明鏡止水",
+          "event_type": "turn_end"
+        }
+      ]
+    },
+    "1-0-066": {
+      "abilities": [
+        {
+          "name": "開戦指示",
+          "event_type": "battle_started"
+        }
+      ]
+    },
+    "1-0-067": {
+      "abilities": [
+        {
+          "name": "一騎打ち",
+          "event_type": "battle_started"
+        }
+      ]
+    },
+    "1-0-068": {
+      "abilities": [
+        {
+          "name": "移動要塞",
+          "event_type": "opponent_turn_started"
+        }
+      ]
+    },
+    "1-0-069": {
+      "abilities": [
+        {
+          "name": "絶妙な挑発",
+          "event_type": "opponent_unit_entered"
+        }
+      ]
+    },
+    "1-0-073": {
+      "abilities": [
+        {
+          "name": "王の陣中見舞い",
+          "event_type": "battle_won"
+        }
+      ]
+    },
+    "1-0-075": {
+      "abilities": [
+        {
+          "name": "音速の槍",
+          "event_type": "battle_won"
+        }
+      ]
+    },
+    "1-0-076": {
+      "abilities": [
+        {
+          "name": "突撃の合図",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-077": {
+      "abilities": [
+        {
+          "name": "アーマーブレイク",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-078": {
+      "abilities": [
+        {
+          "name": "インペリアルソード",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-079": {
+      "abilities": [
+        {
+          "name": "ダインスレイフ",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-080": {
+      "abilities": [
+        {
+          "name": "ニードルヘル",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-082": {
+      "abilities": [
+        {
+          "name": "アースクエイク",
+          "event_type": "battle_started"
+        }
+      ]
+    },
+    "1-0-083": {
+      "abilities": [
+        {
+          "name": "フォトン",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-084": {
+      "abilities": [
+        {
+          "name": "フォトン・ソード",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-089": {
+      "abilities": [
+        {
+          "name": "ムーンセイヴァー",
+          "event_type": "unit_attacked"
+        }
+      ]
+    },
+    "1-0-094": {
+      "abilities": [
+        {
+          "name": "解呪",
+          "event_type": "player_attack_success"
+        }
+      ]
+    },
+    "1-0-097": {
+      "abilities": [
+        {
+          "name": "追い風",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-098": {
+      "abilities": [
+        {
+          "name": "ナチュラルフルーツ",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-099": {
+      "abilities": [
+        {
+          "name": "ハウリング",
+          "event_type": "unit_entered"
+        }
+      ]
+    },
+    "1-0-100": {
+      "abilities": [
+        {
+          "name": "逆転の大竜巻",
+          "event_type": "opponent_unit_attacked"
+        }
+      ]
+    }
+  }
+}
